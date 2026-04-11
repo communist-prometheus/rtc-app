@@ -99,24 +99,8 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
   let audioMuted = false
   let videoMuted = false
 
-  let iceServers: RTCIceServer[] = [
-    { urls: 'stun:stun.l.google.com:19302' },
-  ]
-
-  const fetchTurnCredentials = async () => {
-    try {
-      const host = globalThis.location.port === '4321'
-        ? 'localhost:8788'
-        : 'turn-creds.comprom.org'
-      const proto = globalThis.location.protocol === 'https:' ? 'https:' : 'http:'
-      const r = await fetch(`${proto}//${host}/api/turn-credentials`)
-      const data = await r.json() as { iceServers: RTCIceServer[] }
-      iceServers = data.iceServers
-      log(`TURN credentials acquired (${iceServers.length} servers)`, 'success')
-    } catch (e) {
-      log('TURN credentials unavailable, STUN only', 'warn')
-    }
-  }
+  const iceServers: RTCIceServer[] = []
+  const ICE_TIMEOUT_MS = 5000
 
   /* ── peer connection ── */
   const createPeerConnection = (remoteId: string): RTCPeerConnection => {
@@ -146,13 +130,30 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       }
     }
 
+    const iceTimer = setTimeout(() => {
+      const state = pc.iceConnectionState
+      if (state !== 'connected' && state !== 'completed') {
+        const peer = peers.get(remoteId)
+        if (peer && !peer.relayActive) {
+          log(`P2P timeout, switching to WS relay for ${remoteId.slice(0, 8)}`, 'warn')
+          notify('Using server relay')
+          startRelay(remoteId)
+        }
+      }
+    }, ICE_TIMEOUT_MS)
+
     pc.oniceconnectionstatechange = () => {
       log(`ICE ${remoteId.slice(0, 8)}: ${pc.iceConnectionState}`)
-      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        clearTimeout(iceTimer)
+        log(`P2P established with ${remoteId.slice(0, 8)}`, 'success')
+      }
+      if (pc.iceConnectionState === 'failed') {
+        clearTimeout(iceTimer)
         const peer = peers.get(remoteId)
         if (peer && !peer.relayActive) {
           log(`P2P failed, switching to WS relay for ${remoteId.slice(0, 8)}`, 'warn')
-          notify('P2P failed — using server relay')
+          notify('Using server relay')
           startRelay(remoteId)
         }
       }
@@ -474,9 +475,6 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     } catch {
       log('Camera unavailable. Joining without video.', 'warn')
     }
-
-    /* fetch TURN credentials before connecting */
-    await fetchTurnCredentials()
 
     /* connect signaling */
     const host = globalThis.location.port === '4321'
