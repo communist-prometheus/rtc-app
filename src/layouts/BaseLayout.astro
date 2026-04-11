@@ -1,0 +1,92 @@
+---
+import { ClientRouter } from 'astro:transitions';
+import ThemeToggle from '@/components/ThemeToggle.astro';
+import '@/styles/theme.css';
+import '@/styles/utilities.css';
+
+interface Props {
+  readonly title: string;
+  readonly description?: string | undefined;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+    {description && <meta name="description" content={description} />}
+    <ClientRouter />
+    <script is:inline>
+      (function () {
+        var getTheme = function () {
+          return (
+            localStorage.getItem('theme') ||
+            (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          );
+        };
+        document.documentElement.dataset['theme'] = getTheme();
+        document.addEventListener('astro:before-swap', function (e) {
+          e.newDocument.documentElement.dataset['theme'] = getTheme();
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <header>
+      <nav class="container" aria-label="Primary navigation">
+        <a href="/" class="logo" aria-label="rtc-less home">rtc-less</a>
+        <ThemeToggle />
+      </nav>
+    </header>
+    <main>
+      <slot />
+    </main>
+  </body>
+</html>
+
+<style>
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+  }
+
+  main {
+    flex: 1;
+    view-transition-name: main-content;
+  }
+
+  header {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 10;
+    background: var(--color-background);
+    border-block-end: 1px solid var(--color-border);
+  }
+
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: var(--spacing-sm);
+  }
+
+  .logo {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    text-decoration: none;
+    letter-spacing: -0.025em;
+  }
+
+  .logo:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+</style>

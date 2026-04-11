@@ -1,0 +1,113 @@
+---
+---
+
+<button
+  type="button"
+  aria-label="Toggle theme"
+  data-theme-toggle
+>
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle class="sun" cx="12" cy="12" r="5"></circle>
+    <line class="sun" x1="12" y1="1" x2="12" y2="3"></line>
+    <line class="sun" x1="12" y1="21" x2="12" y2="23"></line>
+    <line class="sun" x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+    <line class="sun" x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+    <line class="sun" x1="1" y1="12" x2="3" y2="12"></line>
+    <line class="sun" x1="21" y1="12" x2="23" y2="12"></line>
+    <line class="sun" x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+    <line class="sun" x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    <path class="moon" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+  </svg>
+</button>
+
+<script>
+  const setTheme = (theme: string): void => {
+    document.documentElement.dataset['theme'] = theme;
+    localStorage.setItem('theme', theme);
+  };
+
+  const toggleThemeWithAnimation = (event: MouseEvent): void => {
+    const currentTheme = document.documentElement.dataset['theme'];
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+
+    if (!document.startViewTransition) {
+      setTheme(newTheme);
+      return;
+    }
+
+    const x = event.clientX;
+    const y = event.clientY;
+    const endRadius = Math.hypot(
+      Math.max(x, globalThis.innerWidth - x),
+      Math.max(y, globalThis.innerHeight - y),
+    );
+
+    document.documentElement.style.setProperty('--x', `${String(x)}px`);
+    document.documentElement.style.setProperty('--y', `${String(y)}px`);
+    document.documentElement.style.setProperty('--r', `${String(endRadius)}px`);
+
+    document.startViewTransition({
+      update: () => setTheme(newTheme),
+      types: ['theme'],
+    });
+  };
+
+  const bindToggle = (): void => {
+    document.querySelectorAll<HTMLElement>('[data-theme-toggle]').forEach((btn) => {
+      if (btn.dataset['themeInit'] === 'true') return;
+      btn.dataset['themeInit'] = 'true';
+      btn.addEventListener('click', toggleThemeWithAnimation);
+    });
+  };
+
+  bindToggle();
+  document.addEventListener('astro:after-swap', bindToggle);
+</script>
+
+<style>
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0;
+    background: transparent;
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  button:hover {
+    background: var(--color-surface);
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  svg {
+    width: 1.25rem;
+    height: 1.25rem;
+    pointer-events: none;
+  }
+
+  .sun {
+    display: none;
+  }
+
+  .moon {
+    display: block;
+  }
+
+  :global([data-theme='dark']) .sun {
+    display: block;
+  }
+
+  :global([data-theme='dark']) .moon {
+    display: none;
+  }
+</style>

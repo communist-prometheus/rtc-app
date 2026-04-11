@@ -1,0 +1,163 @@
+:root {
+  --color-background: hsl(0, 0%, 100%);
+  --color-surface: hsl(0, 0%, 98%);
+  --color-surface-elevated: hsl(0, 0%, 100%);
+  --color-text-primary: hsl(0, 0%, 13%);
+  --color-text-secondary: hsl(0, 0%, 40%);
+  --color-border: hsl(0, 0%, 90%);
+  --color-accent: hsl(12, 80%, 45%);
+  --color-accent-hover: hsl(12, 80%, 38%);
+  --color-on-accent: white;
+
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 1rem;
+  --spacing-md: 1.5rem;
+  --spacing-lg: 2rem;
+  --spacing-xl: 3rem;
+  --spacing-2xl: 4rem;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", monospace;
+
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --color-background: hsl(0, 0%, 10%);
+  --color-surface: hsl(0, 0%, 13%);
+  --color-surface-elevated: hsl(0, 0%, 16%);
+  --color-text-primary: hsl(0, 0%, 95%);
+  --color-text-secondary: hsl(0, 0%, 65%);
+  --color-border: hsl(0, 0%, 25%);
+  --color-accent: hsl(14, 85%, 60%);
+  --color-accent-hover: hsl(14, 85%, 68%);
+  --color-on-accent: hsl(0, 0%, 7%);
+
+  color-scheme: dark;
+}
+
+/* Theme toggle: circular reveal via document.startViewTransition() */
+html:active-view-transition-type(theme) {
+  view-transition-name: root;
+
+  /* Remove main-content from its own group so it falls into root snapshot */
+  main {
+    view-transition-name: none;
+  }
+
+  &::view-transition-group(root),
+  &::view-transition-image-pair(root) {
+    isolation: isolate;
+  }
+
+  &::view-transition-old(root) {
+    animation: none;
+    mix-blend-mode: normal;
+    z-index: 1;
+  }
+
+  &::view-transition-new(root) {
+    animation: reveal 0.5s ease-in-out forwards;
+    mix-blend-mode: normal;
+    z-index: 2;
+  }
+}
+
+/* Navigation transitions: animate only main content with slide (not during theme toggle) */
+html:not(:active-view-transition-type(theme))::view-transition-old(main-content) {
+  animation: slide-out 0.3s ease-out forwards;
+}
+
+html:not(:active-view-transition-type(theme))::view-transition-new(main-content) {
+  animation: slide-in 0.3s ease-out forwards;
+}
+
+@keyframes reveal {
+  from {
+    clip-path: circle(0 at var(--x, 50%) var(--y, 50%));
+  }
+  to {
+    clip-path: circle(var(--r, 100vmax) at var(--x, 50%) var(--y, 50%));
+  }
+}
+
+@keyframes slide-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-30px);
+    opacity: 0;
+  }
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(30px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  background: var(--color-background);
+  scrollbar-gutter: stable;
+}
+
+body {
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+img,
+picture,
+video,
+canvas,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+input,
+button,
+textarea,
+select {
+  font: inherit;
+}
+
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  overflow-wrap: break-word;
+}

@@ -1,1 +1,21 @@
-{"name":"@rtc-less/rtc-app","private":true,"description":"Astro SSG frontend for rtc-less video conferencing"}
+{
+  "name": "@rtc-less/rtc-app",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Astro SSG frontend for rtc-less video conferencing",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro check && astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.6",
+    "@astrojs/node": "9",
+    "@rtc-less/rtc-components": "workspace:*",
+    "astro": "^5.17.1",
+    "typescript": "^5.9.3"
+  }
+}
