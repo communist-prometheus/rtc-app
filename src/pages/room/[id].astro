@@ -101,7 +101,7 @@ const { id } = Astro.params;
   /* -----------------------------------------------------------
    * Media
    * --------------------------------------------------------- */
-  const withTimeout = <T>(
+  const withTimeout = <T,>(
     promise: Promise<T>,
     ms: number
   ): Promise<T> =>
@@ -271,7 +271,7 @@ const { id } = Astro.params;
   };
 
   const connectSignaling = (roomId: string): void => {
-    const signalingHost = (globalThis as Record<string, unknown>).__SIGNALING_HOST ?? globalThis.location.host;
+    const signalingHost = (globalThis as Record<string, unknown>)['__SIGNALING_HOST'] ?? globalThis.location.host;
     const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${signalingHost}/ws/room/${roomId}`;
     log(`Connecting to signaling server at ${wsUrl}...`);
