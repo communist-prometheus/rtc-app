@@ -65,7 +65,7 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
 
     const host = globalThis.location.port === '4321'
       ? 'localhost:8787'
-      : 'rtc-signal.igor-ganov.workers.dev'
+      : 'signal.comprom.org'
     const proto = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${host}/ws/room/${roomId}`)
     ws.addEventListener('open', () => log('Connected to signaling', 'success'))
