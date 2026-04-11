@@ -1,88 +1,660 @@
 ---
 import BaseLayout from '@/layouts/BaseLayout.astro'
+
 ---
 
 <BaseLayout title="Room | rtc-less">
-  <section data-room-shell>
-    <header>
-      <h1>Video Room</h1>
-      <output id="room-info" role="status" aria-live="polite" aria-atomic="true">
-        <span>Loading...</span>
-      </output>
-      <button id="copy-link" type="button">Copy Link</button>
-    </header>
+  <section id="room">
+    <nav id="toolbar">
+      <output id="room-info">Loading...</output>
+      <button id="copy-link" type="button" title="Copy room link">Copy Link</button>
+      <span id="peer-count">0 participants</span>
+    </nav>
 
-    <rtc-video-grid id="video-grid" aria-label="Video feeds">
-      <rtc-video-tile id="local-tile" label="You (local)"></rtc-video-tile>
-    </rtc-video-grid>
+    <main id="video-area">
+      <section id="remote-grid"></section>
+      <aside id="self-view" draggable="true">
+        <video id="local-video" autoplay muted playsinline></video>
+        <span id="self-label">You</span>
+      </aside>
+    </main>
 
-    <rtc-controls id="controls"></rtc-controls>
-    <rtc-log-panel id="log-panel" expanded></rtc-log-panel>
+    <footer id="controls">
+      <button id="btn-mic" type="button" aria-pressed="false" title="Toggle microphone">Mic On</button>
+      <button id="btn-cam" type="button" aria-pressed="false" title="Toggle camera">Cam On</button>
+      <button id="btn-chat" type="button" title="Toggle chat">Chat</button>
+      <button id="btn-log" type="button" title="Toggle debug log">Log</button>
+      <button id="btn-leave" type="button" title="Leave call">Leave</button>
+    </footer>
+
+    <aside id="chat-panel" class="side-panel hidden">
+      <header>
+        <h3>Chat</h3>
+        <button id="close-chat" type="button" aria-label="Close chat">x</button>
+      </header>
+      <ol id="chat-messages"></ol>
+      <form id="chat-form">
+        <input id="chat-input" type="text" placeholder="Message..." autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </aside>
+
+    <aside id="log-panel" class="side-panel hidden">
+      <header>
+        <h3>Debug Log</h3>
+        <button id="close-log" type="button" aria-label="Close log">x</button>
+      </header>
+      <ol id="log-entries"></ol>
+    </aside>
+
+    <div id="notifications" aria-live="polite"></div>
   </section>
 </BaseLayout>
 
 <script>
-  import '@rtc-less/rtc-components'
+  /* ── helpers ── */
+  const $ = <T extends HTMLElement>(s: string) =>
+    document.querySelector<T>(s)
 
-  const log = (message: string, level = 'info') => {
-    const panel = document.getElementById('log-panel')
-    if (panel && 'addEntry' in panel) {
-      (panel as { addEntry: (m: string, l: string) => void }).addEntry(message, level)
-    }
+  const log = (msg: string, level = 'info') => {
+    const li = document.createElement('li')
+    li.className = level
+    li.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`
+    $('#log-entries')?.appendChild(li)
+    li.scrollIntoView({ block: 'end' })
+    console.log(`[${level}] ${msg}`)
+  }
+
+  const notify = (text: string) => {
+    const el = $('#notifications')
+    if (!el) return
+    const n = document.createElement('div')
+    n.className = 'toast'
+    n.textContent = text
+    el.appendChild(n)
+    setTimeout(() => n.remove(), 4000)
   }
 
   const getRoomId = (): string => {
-    const parts = globalThis.location.pathname.split('/room/')
-    return parts[1] ?? globalThis.crypto.randomUUID()
+    const m = globalThis.location.pathname.match(/\/room\/(.+)/)
+    return m?.[1] ?? globalThis.crypto.randomUUID()
   }
 
-  const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
-    Promise.race([p, new Promise<never>((_, r) => setTimeout(() => r(new Error('Timeout')), ms))])
+  /* ── state ── */
+  const peers = new Map<string, {
+    pc: RTCPeerConnection
+    el: HTMLElement
+    video: HTMLVideoElement
+  }>()
 
+  let localStream: MediaStream | undefined
+  let userId = ''
+  let ws: WebSocket
+  let audioMuted = false
+  let videoMuted = false
+
+  const iceServers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+  ]
+
+  /* ── peer connection ── */
+  const createPeerConnection = (remoteId: string): RTCPeerConnection => {
+    const pc = new RTCPeerConnection({ iceServers })
+
+    if (localStream) {
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream!))
+    }
+
+    pc.onicecandidate = e => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({
+          type: 'ice-candidate',
+          target: remoteId,
+          candidate: e.candidate.candidate,
+          sdpMid: e.candidate.sdpMid,
+          sdpMLineIndex: e.candidate.sdpMLineIndex,
+        }))
+      }
+    }
+
+    pc.ontrack = e => {
+      log(`Track received from ${remoteId.slice(0, 8)}`, 'success')
+      const peer = peers.get(remoteId)
+      if (peer && e.streams[0]) {
+        peer.video.srcObject = e.streams[0]
+      }
+    }
+
+    pc.oniceconnectionstatechange = () => {
+      log(`ICE ${remoteId.slice(0, 8)}: ${pc.iceConnectionState}`)
+      if (pc.iceConnectionState === 'failed') {
+        log(`Restarting ICE for ${remoteId.slice(0, 8)}`, 'warn')
+        pc.restartIce()
+      }
+    }
+
+    return pc
+  }
+
+  const addRemotePeer = (remoteId: string): void => {
+    if (peers.has(remoteId)) return
+
+    const el = document.createElement('article')
+    el.className = 'remote-peer'
+    el.id = `peer-${remoteId}`
+
+    const video = document.createElement('video')
+    video.autoplay = true
+    video.playsInline = true
+
+    const label = document.createElement('span')
+    label.className = 'peer-label'
+    label.textContent = remoteId.slice(0, 8)
+
+    el.appendChild(video)
+    el.appendChild(label)
+    $('#remote-grid')?.appendChild(el)
+
+    const pc = createPeerConnection(remoteId)
+    peers.set(remoteId, { pc, el, video })
+    updatePeerCount()
+  }
+
+  const removeRemotePeer = (remoteId: string): void => {
+    const peer = peers.get(remoteId)
+    if (!peer) return
+    peer.pc.close()
+    peer.el.remove()
+    peers.delete(remoteId)
+    updatePeerCount()
+  }
+
+  const updatePeerCount = () => {
+    const el = $('#peer-count')
+    if (el) el.textContent = `${peers.size + 1} participants`
+  }
+
+  /* ── signaling ── */
+  const sendOffer = async (remoteId: string) => {
+    const peer = peers.get(remoteId)
+    if (!peer) return
+    const offer = await peer.pc.createOffer()
+    await peer.pc.setLocalDescription(offer)
+    ws.send(JSON.stringify({
+      type: 'offer',
+      target: remoteId,
+      sdp: offer.sdp,
+    }))
+    log(`Offer sent to ${remoteId.slice(0, 8)}`)
+  }
+
+  const handleOffer = async (from: string, sdp: string) => {
+    addRemotePeer(from)
+    const peer = peers.get(from)!
+    await peer.pc.setRemoteDescription({ type: 'offer', sdp })
+    const answer = await peer.pc.createAnswer()
+    await peer.pc.setLocalDescription(answer)
+    ws.send(JSON.stringify({
+      type: 'answer',
+      target: from,
+      sdp: answer.sdp,
+    }))
+    log(`Answer sent to ${from.slice(0, 8)}`)
+  }
+
+  const handleAnswer = async (from: string, sdp: string) => {
+    const peer = peers.get(from)
+    if (!peer) return
+    await peer.pc.setRemoteDescription({ type: 'answer', sdp })
+    log(`Answer received from ${from.slice(0, 8)}`)
+  }
+
+  const handleIceCandidate = async (
+    from: string,
+    candidate: string,
+    sdpMid: string | null,
+    sdpMLineIndex: number | null
+  ) => {
+    const peer = peers.get(from)
+    if (!peer) return
+    await peer.pc.addIceCandidate({ candidate, sdpMid, sdpMLineIndex })
+  }
+
+  const handleSignalingMessage = async (data: string) => {
+    const msg = JSON.parse(data)
+
+    switch (msg.type) {
+      case 'room-state': {
+        userId = msg.userId
+        log(`Joined as ${userId.slice(0, 8)}. ${msg.users.length} in room.`, 'success')
+        const others = (msg.users as string[]).filter(id => id !== userId)
+        for (const id of others) {
+          addRemotePeer(id)
+          await sendOffer(id)
+        }
+        break
+      }
+      case 'peer-joined': {
+        log(`${msg.userId.slice(0, 8)} joined`, 'success')
+        notify(`${msg.userId.slice(0, 8)} joined the room`)
+        addRemotePeer(msg.userId)
+        break
+      }
+      case 'peer-left': {
+        log(`${msg.userId.slice(0, 8)} left`, 'warn')
+        notify(`${msg.userId.slice(0, 8)} left the room`)
+        removeRemotePeer(msg.userId)
+        break
+      }
+      case 'offer': {
+        await handleOffer(msg.from, msg.sdp)
+        break
+      }
+      case 'answer': {
+        await handleAnswer(msg.from, msg.sdp)
+        break
+      }
+      case 'ice-candidate': {
+        await handleIceCandidate(
+          msg.from, msg.candidate,
+          msg.sdpMid, msg.sdpMLineIndex
+        )
+        break
+      }
+      case 'chat': {
+        addChatMessage(msg.from.slice(0, 8), msg.text)
+        break
+      }
+    }
+  }
+
+  /* ── chat ── */
+  const addChatMessage = (from: string, text: string) => {
+    const li = document.createElement('li')
+    li.innerHTML = `<strong>${from}:</strong> ${text}`
+    $('#chat-messages')?.appendChild(li)
+    li.scrollIntoView({ block: 'end' })
+  }
+
+  /* ── media controls ── */
+  const toggleMic = () => {
+    audioMuted = !audioMuted
+    localStream?.getAudioTracks().forEach(t => { t.enabled = !audioMuted })
+    const btn = $('#btn-mic')
+    if (btn) {
+      btn.textContent = audioMuted ? 'Mic Off' : 'Mic On'
+      btn.setAttribute('aria-pressed', String(audioMuted))
+    }
+    log(audioMuted ? 'Microphone muted' : 'Microphone unmuted')
+  }
+
+  const toggleCam = () => {
+    videoMuted = !videoMuted
+    localStream?.getVideoTracks().forEach(t => { t.enabled = !videoMuted })
+    const btn = $('#btn-cam')
+    if (btn) {
+      btn.textContent = videoMuted ? 'Cam Off' : 'Cam On'
+      btn.setAttribute('aria-pressed', String(videoMuted))
+    }
+    log(videoMuted ? 'Camera off' : 'Camera on')
+  }
+
+  const leaveRoom = () => {
+    peers.forEach((_, id) => removeRemotePeer(id))
+    localStream?.getTracks().forEach(t => t.stop())
+    ws?.close()
+    globalThis.location.href = '/'
+  }
+
+  /* ── draggable self-view ── */
+  const makeDraggable = (el: HTMLElement) => {
+    let x = 0, y = 0, dragging = false
+    el.addEventListener('mousedown', e => {
+      dragging = true
+      x = e.clientX - el.offsetLeft
+      y = e.clientY - el.offsetTop
+      el.style.cursor = 'grabbing'
+    })
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return
+      el.style.left = `${e.clientX - x}px`
+      el.style.top = `${e.clientY - y}px`
+    })
+    document.addEventListener('mouseup', () => {
+      dragging = false
+      el.style.cursor = 'grab'
+    })
+  }
+
+  /* ── init ── */
   const init = async () => {
     const roomId = getRoomId()
-    const info = document.getElementById('room-info')
-    if (info) info.innerHTML = `<span>Room: </span><code>${roomId}</code>`
+    const info = $('#room-info')
+    if (info) info.textContent = `Room: ${roomId.slice(0, 8)}...`
 
-    log(`Joining room ${roomId}`)
-
-    document.getElementById('copy-link')?.addEventListener('click', () => {
-      const url = `${globalThis.location.origin}/room/${roomId}`
-      globalThis.navigator.clipboard.writeText(url)
-      log('Link copied', 'success')
+    /* copy link */
+    $('#copy-link')?.addEventListener('click', () => {
+      globalThis.navigator.clipboard.writeText(globalThis.location.href)
+      notify('Link copied!')
     })
 
-    try {
-      const stream = await withTimeout(
-        globalThis.navigator.mediaDevices.getUserMedia({ video: true, audio: true }), 5000
-      )
-      log('Camera acquired', 'success')
-      const tile = document.getElementById('local-tile')
-      if (tile && 'stream' in tile) (tile as { stream: MediaStream }).stream = stream
-    } catch { log('No camera. Joining audio-only.', 'warn') }
+    /* controls */
+    $('#btn-mic')?.addEventListener('click', toggleMic)
+    $('#btn-cam')?.addEventListener('click', toggleCam)
+    $('#btn-leave')?.addEventListener('click', leaveRoom)
 
+    /* panels */
+    $('#btn-chat')?.addEventListener('click', () => {
+      $('#chat-panel')?.classList.toggle('hidden')
+      $('#log-panel')?.classList.add('hidden')
+    })
+    $('#btn-log')?.addEventListener('click', () => {
+      $('#log-panel')?.classList.toggle('hidden')
+      $('#chat-panel')?.classList.add('hidden')
+    })
+    $('#close-chat')?.addEventListener('click', () =>
+      $('#chat-panel')?.classList.add('hidden'))
+    $('#close-log')?.addEventListener('click', () =>
+      $('#log-panel')?.classList.add('hidden'))
+
+    /* chat form */
+    $('#chat-form')?.addEventListener('submit', e => {
+      e.preventDefault()
+      const input = $<HTMLInputElement>('#chat-input')
+      if (!input?.value.trim()) return
+      const text = input.value.trim()
+      ws.send(JSON.stringify({ type: 'chat', text }))
+      addChatMessage('You', text)
+      input.value = ''
+    })
+
+    /* draggable self-view */
+    const selfView = $('#self-view')
+    if (selfView) makeDraggable(selfView)
+
+    /* acquire media */
+    log('Requesting camera and microphone...')
+    try {
+      localStream = await globalThis.navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      })
+      const localVideo = $<HTMLVideoElement>('#local-video')
+      if (localVideo) localVideo.srcObject = localStream
+      log('Camera acquired', 'success')
+    } catch {
+      log('Camera unavailable. Joining without video.', 'warn')
+    }
+
+    /* connect signaling */
     const host = globalThis.location.port === '4321'
       ? 'localhost:8787'
       : 'signal.comprom.org'
     const proto = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${host}/ws/room/${roomId}`)
-    ws.addEventListener('open', () => log('Connected to signaling', 'success'))
-    ws.addEventListener('close', () => log('Disconnected', 'warn'))
-    ws.addEventListener('error', () => log('Connection error', 'error'))
-    ws.addEventListener('message', e => {
-      const msg = JSON.parse(e.data)
-      log(`Signal: ${msg.type} ${msg.userId ?? msg.from ?? ''}`)
+    const url = `${proto}//${host}/ws/room/${roomId}`
+    log(`Connecting to ${url}...`)
+
+    ws = new WebSocket(url)
+    ws.addEventListener('open', () => log('Signaling connected', 'success'))
+    ws.addEventListener('close', () => {
+      log('Signaling disconnected', 'warn')
+      notify('Disconnected from server')
     })
+    ws.addEventListener('error', () => log('Signaling error', 'error'))
+    ws.addEventListener('message', e => handleSignalingMessage(e.data))
+
+    updatePeerCount()
   }
 
   void init()
 </script>
 
 <style>
-  section { display: grid; grid-template-rows: auto 1fr auto auto; min-height: calc(100vh - 64px); gap: var(--spacing-sm); padding: var(--spacing-sm); }
-  header { display: flex; align-items: center; gap: var(--spacing-sm); flex-wrap: wrap; }
-  h1 { font-size: 1.25rem; }
-  output { font-family: var(--font-mono); font-size: 0.875rem; }
-  code { background: var(--color-surface); padding: 0.125rem 0.5rem; border-radius: var(--radius-sm); }
-  button { padding: 0.5rem 1rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text-primary); cursor: pointer; }
+  #room {
+    position: relative;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: calc(100vh - 60px);
+    overflow: hidden;
+  }
+
+  /* ── toolbar ── */
+  #toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: 0.5rem var(--spacing-sm);
+    border-bottom: 1px solid var(--color-border);
+    font-size: 0.875rem;
+  }
+  #toolbar output {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+  #toolbar button {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text-primary);
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  #peer-count {
+    color: var(--color-text-secondary);
+    margin-left: auto;
+  }
+
+  /* ── video area ── */
+  #video-area {
+    position: relative;
+    background: hsl(0, 0%, 8%);
+    overflow: hidden;
+  }
+
+  #remote-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 4px;
+    height: 100%;
+    padding: 4px;
+  }
+  #remote-grid:empty::after {
+    content: 'Waiting for participants...';
+    color: hsl(0, 0%, 40%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    font-size: 1.25rem;
+    grid-column: 1 / -1;
+  }
+
+  :global(.remote-peer) {
+    position: relative;
+    background: hsl(0, 0%, 12%);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  :global(.remote-peer video) {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  :global(.peer-label) {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+  }
+
+  /* ── self view (PiP) ── */
+  #self-view {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 200px;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    box-shadow: var(--shadow-lg);
+    cursor: grab;
+    z-index: 10;
+    border: 2px solid var(--color-accent);
+  }
+  #self-view video {
+    width: 100%;
+    display: block;
+    transform: scaleX(-1);
+  }
+  #self-label {
+    position: absolute;
+    bottom: 4px;
+    left: 6px;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+  }
+
+  /* ── controls ── */
+  #controls {
+    display: flex;
+    justify-content: center;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border);
+  }
+  #controls button {
+    padding: 0.5rem 1.25rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-primary);
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background var(--transition-fast);
+  }
+  #controls button:hover { background: var(--color-border); }
+  #controls button[aria-pressed="true"] {
+    background: hsl(0, 70%, 40%);
+    color: white;
+    border-color: hsl(0, 70%, 30%);
+  }
+  #btn-leave {
+    background: hsl(0, 70%, 45%) !important;
+    color: white !important;
+    border-color: hsl(0, 70%, 35%) !important;
+  }
+  #btn-leave:hover { background: hsl(0, 70%, 35%) !important; }
+
+  /* ── side panels ── */
+  .side-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 320px;
+    height: 100%;
+    background: var(--color-surface);
+    border-left: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    z-index: 20;
+    transition: transform var(--transition-base);
+  }
+  .side-panel.hidden { transform: translateX(100%); }
+  .side-panel header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem var(--spacing-sm);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .side-panel header h3 { font-size: 0.9rem; margin: 0; }
+  .side-panel header button {
+    background: none;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: 1rem;
+  }
+
+  /* ── chat ── */
+  #chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--spacing-xs);
+    list-style: none;
+    margin: 0;
+    font-size: 0.85rem;
+  }
+  #chat-messages li { padding: 4px 0; border-bottom: 1px solid var(--color-border); }
+  #chat-form {
+    display: flex;
+    gap: 4px;
+    padding: var(--spacing-xs);
+    border-top: 1px solid var(--color-border);
+  }
+  #chat-form input {
+    flex: 1;
+    padding: 6px 8px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-background);
+    color: var(--color-text-primary);
+    font-size: 0.85rem;
+  }
+  #chat-form button {
+    padding: 6px 12px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+
+  /* ── log ── */
+  #log-entries {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--spacing-xs);
+    list-style: none;
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+  }
+  #log-entries li { padding: 2px 0; }
+  :global(#log-entries .success) { color: hsl(140, 70%, 50%); }
+  :global(#log-entries .warn) { color: hsl(40, 90%, 55%); }
+  :global(#log-entries .error) { color: hsl(0, 80%, 55%); }
+  :global(#log-entries .info) { color: var(--color-text-secondary); }
+
+  /* ── notifications ── */
+  #notifications {
+    position: fixed;
+    top: 70px;
+    right: 16px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  :global(.toast) {
+    background: var(--color-surface-elevated);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    box-shadow: var(--shadow-md);
+    animation: slideIn 0.3s ease-out, fadeOut 0.3s ease-in 3.5s forwards;
+  }
+  @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
 </style>
