@@ -14,7 +14,7 @@
   "dependencies": {
     "@astrojs/check": "^0.9.6",
     "@astrojs/node": "9",
-    "@rtc-less/rtc-components": "workspace:*",
+    "@rtc-less/rtc-components": "github:communist-prometheus/rtc-components",
     "astro": "^5.17.1",
     "typescript": "^5.9.3"
   }
