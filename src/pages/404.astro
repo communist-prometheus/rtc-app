@@ -85,6 +85,11 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     pc: RTCPeerConnection
     el: HTMLElement
     video: HTMLVideoElement
+    relayActive?: boolean
+    recorder?: MediaRecorder
+    mediaSource?: MediaSource
+    sourceBuffer?: SourceBuffer
+    pendingChunks?: ArrayBuffer[]
   }>()
 
   let localStream: MediaStream | undefined
@@ -142,13 +147,81 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
 
     pc.oniceconnectionstatechange = () => {
       log(`ICE ${remoteId.slice(0, 8)}: ${pc.iceConnectionState}`)
-      if (pc.iceConnectionState === 'failed') {
-        log(`Restarting ICE for ${remoteId.slice(0, 8)}`, 'warn')
-        pc.restartIce()
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        const peer = peers.get(remoteId)
+        if (peer && !peer.relayActive) {
+          log(`P2P failed, switching to WS relay for ${remoteId.slice(0, 8)}`, 'warn')
+          notify('P2P failed — using server relay')
+          startRelay(remoteId)
+        }
       }
     }
 
     return pc
+  }
+
+  /* ── WebSocket media relay (fallback) ── */
+  const PEER_ID_BYTES = 36
+  const RELAY_CHUNK_MS = 200
+
+  const startRelay = (remoteId: string) => {
+    const peer = peers.get(remoteId)
+    if (!peer || peer.relayActive) return
+    peer.relayActive = true
+
+    if (!localStream) return
+
+    const recorder = new MediaRecorder(localStream, {
+      mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+        ? 'video/webm;codecs=vp8,opus'
+        : 'video/webm',
+      videoBitsPerSecond: 500_000,
+    })
+
+    recorder.ondataavailable = async e => {
+      if (e.data.size === 0 || ws.readyState !== WebSocket.OPEN) return
+      const buf = await e.data.arrayBuffer()
+      const header = new TextEncoder().encode(remoteId)
+      const frame = new Uint8Array(PEER_ID_BYTES + buf.byteLength)
+      frame.set(header, 0)
+      frame.set(new Uint8Array(buf), PEER_ID_BYTES)
+      ws.send(frame.buffer)
+    }
+
+    recorder.start(RELAY_CHUNK_MS)
+    peer.recorder = recorder
+    log(`Relay active → ${remoteId.slice(0, 8)}`, 'success')
+  }
+
+  const handleRelayData = (senderId: string, payload: ArrayBuffer) => {
+    const peer = peers.get(senderId)
+    if (!peer) return
+
+    if (!peer.mediaSource) {
+      const ms = new MediaSource()
+      peer.video.src = URL.createObjectURL(ms)
+      peer.mediaSource = ms
+
+      ms.addEventListener('sourceopen', () => {
+        const mime = 'video/webm;codecs=vp8,opus'
+        if (!MediaSource.isTypeSupported(mime)) return
+        const sb = ms.addSourceBuffer(mime)
+        peer.sourceBuffer = sb
+        sb.mode = 'sequence'
+
+        for (const chunk of peer.pendingChunks ?? []) {
+          if (!sb.updating) sb.appendBuffer(chunk)
+        }
+        peer.pendingChunks = []
+      })
+    }
+
+    if (peer.sourceBuffer && !peer.sourceBuffer.updating) {
+      peer.sourceBuffer.appendBuffer(payload)
+    } else {
+      peer.pendingChunks = peer.pendingChunks ?? []
+      peer.pendingChunks.push(payload)
+    }
   }
 
   const addRemotePeer = (remoteId: string): void => {
@@ -419,7 +492,19 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       notify('Disconnected from server')
     })
     ws.addEventListener('error', () => log('Signaling error', 'error'))
-    ws.addEventListener('message', e => handleSignalingMessage(e.data))
+    ws.binaryType = 'arraybuffer'
+    ws.addEventListener('message', e => {
+      if (e.data instanceof ArrayBuffer) {
+        if (e.data.byteLength <= PEER_ID_BYTES) return
+        const senderId = new TextDecoder().decode(
+          new Uint8Array(e.data, 0, PEER_ID_BYTES)
+        )
+        const payload = e.data.slice(PEER_ID_BYTES)
+        handleRelayData(senderId, payload)
+      } else {
+        handleSignalingMessage(e.data)
+      }
+    })
 
     updatePeerCount()
   }
