@@ -1,0 +1,90 @@
+---
+import BaseLayout from '@/layouts/BaseLayout.astro'
+
+export const getStaticPaths = () => [{ params: { id: undefined } }]
+---
+
+<BaseLayout title="Room | rtc-less">
+  <section data-room-shell>
+    <header>
+      <h1>Video Room</h1>
+      <output id="room-info" role="status" aria-live="polite" aria-atomic="true">
+        <span>Loading...</span>
+      </output>
+      <button id="copy-link" type="button">Copy Link</button>
+    </header>
+
+    <rtc-video-grid id="video-grid" aria-label="Video feeds">
+      <rtc-video-tile id="local-tile" label="You (local)"></rtc-video-tile>
+    </rtc-video-grid>
+
+    <rtc-controls id="controls"></rtc-controls>
+    <rtc-log-panel id="log-panel" expanded></rtc-log-panel>
+  </section>
+</BaseLayout>
+
+<script>
+  import '@rtc-less/rtc-components'
+
+  const log = (message: string, level = 'info') => {
+    const panel = document.getElementById('log-panel')
+    if (panel && 'addEntry' in panel) {
+      (panel as { addEntry: (m: string, l: string) => void }).addEntry(message, level)
+    }
+  }
+
+  const getRoomId = (): string => {
+    const parts = globalThis.location.pathname.split('/room/')
+    return parts[1] ?? globalThis.crypto.randomUUID()
+  }
+
+  const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([p, new Promise<never>((_, r) => setTimeout(() => r(new Error('Timeout')), ms))])
+
+  const init = async () => {
+    const roomId = getRoomId()
+    const info = document.getElementById('room-info')
+    if (info) info.innerHTML = `<span>Room: </span><code>${roomId}</code>`
+
+    log(`Joining room ${roomId}`)
+
+    document.getElementById('copy-link')?.addEventListener('click', () => {
+      const url = `${globalThis.location.origin}/room/${roomId}`
+      globalThis.navigator.clipboard.writeText(url)
+      log('Link copied', 'success')
+    })
+
+    try {
+      const stream = await withTimeout(
+        globalThis.navigator.mediaDevices.getUserMedia({ video: true, audio: true }), 5000
+      )
+      log('Camera acquired', 'success')
+      const tile = document.getElementById('local-tile')
+      if (tile && 'stream' in tile) (tile as { stream: MediaStream }).stream = stream
+    } catch { log('No camera. Joining audio-only.', 'warn') }
+
+    const host = globalThis.location.port === '4321'
+      ? 'localhost:8787'
+      : 'rtc-signal.igor-ganov.workers.dev'
+    const proto = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${proto}//${host}/ws/room/${roomId}`)
+    ws.addEventListener('open', () => log('Connected to signaling', 'success'))
+    ws.addEventListener('close', () => log('Disconnected', 'warn'))
+    ws.addEventListener('error', () => log('Connection error', 'error'))
+    ws.addEventListener('message', e => {
+      const msg = JSON.parse(e.data)
+      log(`Signal: ${msg.type} ${msg.userId ?? msg.from ?? ''}`)
+    })
+  }
+
+  void init()
+</script>
+
+<style>
+  section { display: grid; grid-template-rows: auto 1fr auto auto; min-height: calc(100vh - 64px); gap: var(--spacing-sm); padding: var(--spacing-sm); }
+  header { display: flex; align-items: center; gap: var(--spacing-sm); flex-wrap: wrap; }
+  h1 { font-size: 1.25rem; }
+  output { font-family: var(--font-mono); font-size: 0.875rem; }
+  code { background: var(--color-surface); padding: 0.125rem 0.5rem; border-radius: var(--radius-sm); }
+  button { padding: 0.5rem 1rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text-primary); cursor: pointer; }
+</style>
