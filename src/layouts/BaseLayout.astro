@@ -22,6 +22,12 @@ const { title, description } = Astro.props;
     {description && <meta name="description" content={description} />}
     <ClientRouter />
     <script is:inline>
+      // Configure signaling host for dev (Astro on 4321, signaling on 8787)
+      if (location.port === '4321') {
+        window.__SIGNALING_HOST = 'localhost:8787';
+      }
+    </script>
+    <script is:inline>
       (function () {
         var getTheme = function () {
           return (
