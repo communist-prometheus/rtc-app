@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    name: Build, Type-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type-check
+        # astro check runs the Astro TS diagnostics pass
+        run: bunx astro check
+
+      - name: Build
+        # astro check && astro build — mirrors the "build" script in package.json
+        run: bun run build
