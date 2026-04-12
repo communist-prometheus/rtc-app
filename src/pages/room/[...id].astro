@@ -1377,12 +1377,18 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     // Telemetry: start (or join) the room session record. The session
     // id is the roomId itself so multiple peers in the same room
     // share the row (collector uses INSERT OR IGNORE).
+    //
+    // IMPORTANT: this is awaited so the room_sessions row exists
+    // before any subsequent user.connect span lands on the
+    // collector. D1 enforces foreign keys, so firing start as
+    // fire-and-forget races user.connect and the INSERT fails with
+    // SQLITE_CONSTRAINT_FOREIGNKEY.
     telemetrySessionId = roomId
-    void telemetry
-      .startRoomSession(roomId)
-      .catch(() => {
-        /* fire-and-forget */
-      })
+    try {
+      await telemetry.startRoomSession(roomId)
+    } catch {
+      /* telemetry must never break a call */
+    }
 
     /* copy link */
     $('#copy-link')?.addEventListener('click', () => {

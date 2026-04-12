@@ -15,14 +15,22 @@ const DEFAULT_URL = 'https://telemetry.comprom.org'
 
 const getEndpoint = (): string => {
   // Read at call time so test runs can override via globalThis.
-  const fromGlobal = (globalThis as Record<string, unknown>)[
-    '__TELEMETRY_URL__'
-  ]
-  if (typeof fromGlobal === 'string' && fromGlobal) return fromGlobal
+  // An explicit empty string is treated as "disabled" — tests that
+  // need to inspect telemetry spans set their own stub instead.
+  const w = globalThis as Record<string, unknown>
+  if ('__TELEMETRY_URL__' in w) {
+    const fromGlobal = w['__TELEMETRY_URL__']
+    if (typeof fromGlobal === 'string') return fromGlobal
+  }
   // PUBLIC_* vars are inlined at Astro build time.
   const env = import.meta.env as Record<string, string | undefined>
   const fromBuild = env['PUBLIC_TELEMETRY_URL']
-  return fromBuild || DEFAULT_URL
+  if (typeof fromBuild === 'string') return fromBuild
+  // Dev / test mode: no telemetry by default so local runs and CI
+  // don't flood the real collector or flake on its latency.
+  // Individual tests can still enable it via __TELEMETRY_URL__.
+  if (import.meta.env.DEV) return ''
+  return DEFAULT_URL
 }
 
 type SpanName =
@@ -75,6 +83,12 @@ const recordCall = (record: CallRecord): void => {
   w['__telemetryCalls'] = arr
 }
 
+// Hard cap on every telemetry fetch. Without this, a hung DNS or a
+// cold-starting collector could stall any awaited span call (e.g.
+// startRoomSession before WS connect) for tens of seconds and
+// degrade call-join latency. Observability must never block a call.
+const TELEMETRY_FETCH_TIMEOUT_MS = 2000
+
 const post = async (path: string, body: unknown): Promise<void> => {
   const endpoint = getEndpoint()
   if (!endpoint) return
@@ -84,6 +98,7 @@ const post = async (path: string, body: unknown): Promise<void> => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
       keepalive: true,
+      signal: AbortSignal.timeout(TELEMETRY_FETCH_TIMEOUT_MS),
     })
     recordCall({
       path,
