@@ -765,8 +765,9 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       if (!parent) return
       const parentRect = parent.getBoundingClientRect()
       const elRect = el.getBoundingClientRect()
-      offsetX = clientX - (elRect.left - parentRect.left)
-      offsetY = clientY - (elRect.top - parentRect.top)
+      // Cursor position inside the element, in viewport coords.
+      offsetX = clientX - elRect.left
+      offsetY = clientY - elRect.top
       el.style.right = 'auto'
       el.style.bottom = 'auto'
       el.style.left = `${elRect.left - parentRect.left}px`
@@ -780,8 +781,10 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       const parent = el.parentElement
       if (!parent) return
       const parentRect = parent.getBoundingClientRect()
-      const x = clientX - parentRect.left - offsetX
-      const y = clientY - parentRect.top - offsetY
+      // New element viewport-left = clientX - offsetX;
+      // Convert back to parent-relative by subtracting parentRect.left.
+      const x = clientX - offsetX - parentRect.left
+      const y = clientY - offsetY - parentRect.top
       const clamped = clampPosition(x, y)
       el.style.left = `${clamped.x}px`
       el.style.top = `${clamped.y}px`
