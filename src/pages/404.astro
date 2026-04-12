@@ -87,7 +87,8 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     video: HTMLVideoElement
     relayActive?: boolean
     relayInterval?: ReturnType<typeof setInterval>
-    relayCanvas?: HTMLCanvasElement
+    relayImg?: HTMLImageElement
+    lastImgUrl?: string
     audioCtx?: AudioContext
     audioProcessor?: ScriptProcessorNode
     playbackCtx?: AudioContext
@@ -168,12 +169,11 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   const PEER_ID_BYTES = 36
   const RELAY_FPS = 10
   const RELAY_QUALITY = 0.6
-  const RELAY_WIDTH = 320
-  const RELAY_HEIGHT = 240
+  const RELAY_MAX_DIMENSION = 480
   const AUDIO_SAMPLE_RATE = 16000
   const AUDIO_BUFFER_SIZE = 2048
-  const TYPE_VIDEO = 0x76 // 'v'
-  const TYPE_AUDIO = 0x61 // 'a'
+  const TYPE_VIDEO = 0x76 // 'v' - [width:2][height:2][jpeg]
+  const TYPE_AUDIO = 0x61 // 'a' - [pcm16]
 
   const buildFrame = (
     targetId: string,
@@ -186,6 +186,42 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     frame[PEER_ID_BYTES] = type
     frame.set(new Uint8Array(payload), PEER_ID_BYTES + 1)
     return frame.buffer
+  }
+
+  const buildVideoFrame = (
+    targetId: string,
+    width: number,
+    height: number,
+    jpegBuf: ArrayBuffer
+  ): ArrayBuffer => {
+    const headerBytes = new TextEncoder().encode(targetId)
+    const frame = new Uint8Array(
+      PEER_ID_BYTES + 1 + 4 + jpegBuf.byteLength
+    )
+    frame.set(headerBytes, 0)
+    frame[PEER_ID_BYTES] = TYPE_VIDEO
+    const dv = new DataView(frame.buffer)
+    dv.setUint16(PEER_ID_BYTES + 1, width, false)
+    dv.setUint16(PEER_ID_BYTES + 3, height, false)
+    frame.set(new Uint8Array(jpegBuf), PEER_ID_BYTES + 5)
+    return frame.buffer
+  }
+
+  const computeRelayDims = (
+    videoW: number,
+    videoH: number
+  ): { w: number; h: number } => {
+    if (videoW === 0 || videoH === 0) {
+      return { w: 480, h: 270 }
+    }
+    if (videoW >= videoH) {
+      const w = Math.min(RELAY_MAX_DIMENSION, videoW)
+      const h = Math.round((w * videoH) / videoW)
+      return { w, h }
+    }
+    const h = Math.min(RELAY_MAX_DIMENSION, videoH)
+    const w = Math.round((h * videoW) / videoH)
+    return { w, h }
   }
 
   const startRelay = (remoteId: string) => {
@@ -210,20 +246,28 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       sourceVideo.play().catch(() => {})
 
       const canvas = document.createElement('canvas')
-      canvas.width = RELAY_WIDTH
-      canvas.height = RELAY_HEIGHT
       const ctx = canvas.getContext('2d')
 
       const captureVideo = async () => {
         if (!peer.relayActive || ws.readyState !== WebSocket.OPEN || !ctx) return
         try {
-          ctx.drawImage(sourceVideo, 0, 0, RELAY_WIDTH, RELAY_HEIGHT)
+          const vw = sourceVideo.videoWidth
+          const vh = sourceVideo.videoHeight
+          if (vw === 0 || vh === 0) return
+
+          const { w, h } = computeRelayDims(vw, vh)
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w
+            canvas.height = h
+          }
+
+          ctx.drawImage(sourceVideo, 0, 0, w, h)
           const blob = await new Promise<Blob | null>(resolve =>
             canvas.toBlob(resolve, 'image/jpeg', RELAY_QUALITY)
           )
           if (!blob) return
           const buf = await blob.arrayBuffer()
-          ws.send(buildFrame(remoteId, TYPE_VIDEO, buf))
+          ws.send(buildVideoFrame(remoteId, w, h, buf))
         } catch {}
       }
 
@@ -273,28 +317,28 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     if (!peer) return
 
     if (type === TYPE_VIDEO) {
-      if (!peer.relayCanvas) {
-        const canvas = document.createElement('canvas')
-        canvas.width = RELAY_WIDTH
-        canvas.height = RELAY_HEIGHT
-        canvas.className = 'relay-canvas'
-        peer.relayCanvas = canvas
+      if (payload.byteLength < 4) return
+      const jpeg = payload.slice(4)
+
+      if (!peer.relayImg) {
+        const img = document.createElement('img')
+        img.className = 'relay-img'
+        img.alt = ''
+        peer.relayImg = img
         peer.video.style.display = 'none'
-        peer.el.insertBefore(canvas, peer.video)
+        peer.el.insertBefore(img, peer.video)
         log(`Relay receiver ready for ${senderId.slice(0, 8)}`, 'success')
       }
 
-      const blob = new Blob([payload], { type: 'image/jpeg' })
-      const url = URL.createObjectURL(blob)
-      const img = new Image()
-      img.onload = () => {
-        const ctx = peer.relayCanvas?.getContext('2d')
-        if (ctx && peer.relayCanvas) {
-          ctx.drawImage(img, 0, 0, peer.relayCanvas.width, peer.relayCanvas.height)
-        }
-        URL.revokeObjectURL(url)
+      const imgEl = peer.relayImg
+      const blob = new Blob([jpeg], { type: 'image/jpeg' })
+      const newUrl = URL.createObjectURL(blob)
+      const oldUrl = peer.lastImgUrl
+      imgEl.src = newUrl
+      peer.lastImgUrl = newUrl
+      if (oldUrl) {
+        queueMicrotask(() => URL.revokeObjectURL(oldUrl))
       }
-      img.src = url
       return
     }
 
@@ -628,10 +672,19 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
 <style>
   #room {
     position: relative;
-    display: grid;
-    grid-template-rows: auto 1fr auto;
+    display: flex;
+    flex-direction: column;
     height: calc(100vh - 60px);
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     overflow: hidden;
+  }
+  #toolbar, #controls {
+    flex: 0 0 auto;
+  }
+  #video-area {
+    flex: 1 1 0;
   }
 
   /* ── toolbar ── */
@@ -666,14 +719,39 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     position: relative;
     background: hsl(0, 0%, 8%);
     overflow: hidden;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
   }
 
   #remote-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    grid-auto-rows: 1fr;
     gap: 4px;
     height: 100%;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     padding: 4px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  #remote-grid > * {
+    min-width: 0;
+    min-height: 0;
+    max-width: 100%;
+    max-height: 100%;
+  }
+  @media (max-width: 600px) {
+    #remote-grid {
+      grid-template-columns: 1fr;
+    }
+    #self-view {
+      width: 120px;
+      bottom: 70px;
+    }
   }
   #remote-grid:empty::after {
     content: 'Waiting for participants...';
@@ -691,23 +769,19 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     background: hsl(0, 0%, 12%);
     border-radius: var(--radius-sm);
     overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  :global(.remote-peer video) {
+    min-height: 0;
+    min-width: 0;
     max-width: 100%;
     max-height: 100%;
-    width: auto;
-    height: auto;
+  }
+  :global(.remote-peer video),
+  :global(.relay-img) {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
-  }
-  :global(.relay-canvas) {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
-    image-rendering: auto;
+    display: block;
   }
   :global(.peer-label) {
     position: absolute;
