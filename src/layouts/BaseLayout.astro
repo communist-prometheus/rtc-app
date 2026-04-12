@@ -7,9 +7,11 @@ import '@/styles/utilities.css';
 interface Props {
   readonly title: string;
   readonly description?: string | undefined;
+  readonly navVariant?: 'default' | 'full';
 }
 
-const { title, description } = Astro.props;
+const { title, description, navVariant = 'default' } = Astro.props;
+const navClass = navVariant === 'full' ? 'full-bleed' : 'container';
 ---
 
 <!doctype html>
@@ -44,7 +46,7 @@ const { title, description } = Astro.props;
   </head>
   <body>
     <header>
-      <nav class="container" aria-label="Primary navigation">
+      <nav class={navClass} aria-label="Primary navigation">
         <a href="/" class="logo" aria-label="rtc-less home">rtc-less</a>
         <ThemeToggle />
       </nav>
@@ -52,6 +54,23 @@ const { title, description } = Astro.props;
     <main>
       <slot />
     </main>
+    <script>
+      /* Publish the live header height so fixed-positioned panels can
+         anchor to the header's bottom without hardcoding 60px. */
+      const header = document.querySelector('header')
+      if (header) {
+        const sync = () => {
+          document.documentElement.style.setProperty(
+            '--header-height',
+            `${header.offsetHeight}px`
+          )
+        }
+        sync()
+        const ro = new ResizeObserver(sync)
+        ro.observe(header)
+        document.addEventListener('astro:after-swap', sync)
+      }
+    </script>
   </body>
 </html>
 
@@ -80,6 +99,16 @@ const { title, description } = Astro.props;
     align-items: center;
     justify-content: space-between;
     padding-block: var(--spacing-sm);
+  }
+
+  nav.full-bleed {
+    padding-inline: var(--spacing-sm);
+  }
+
+  @media (min-width: 768px) {
+    nav.full-bleed {
+      padding-inline: var(--spacing-md);
+    }
   }
 
   .logo {

@@ -2,6 +2,8 @@
   --color-background: hsl(0, 0%, 100%);
   --color-surface: hsl(0, 0%, 98%);
   --color-surface-elevated: hsl(0, 0%, 100%);
+  --color-surface-video: hsl(0, 0%, 12%);
+  --color-surface-panel: hsl(0, 0%, 16%);
   --color-text-primary: hsl(0, 0%, 13%);
   --color-text-secondary: hsl(0, 0%, 40%);
   --color-border: hsl(0, 0%, 90%);
@@ -37,6 +39,8 @@
   --color-background: hsl(0, 0%, 10%);
   --color-surface: hsl(0, 0%, 13%);
   --color-surface-elevated: hsl(0, 0%, 16%);
+  --color-surface-video: hsl(0, 0%, 6%);
+  --color-surface-panel: hsl(0, 0%, 11%);
   --color-text-primary: hsl(0, 0%, 95%);
   --color-text-secondary: hsl(0, 0%, 65%);
   --color-border: hsl(0, 0%, 25%);

@@ -3,7 +3,7 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
 
 ---
 
-<BaseLayout title="Room | rtc-less">
+<BaseLayout title="Room | rtc-less" navVariant="full">
   <section id="room">
     <dialog id="nickname-dialog" aria-labelledby="nickname-title">
       <form method="dialog" id="nickname-form">
@@ -75,12 +75,18 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
           <line x1="3" y1="3" x2="21" y2="21" stroke-width="2.5"/>
         </svg>
       </button>
+      <button id="btn-share" type="button" aria-pressed="false" aria-label="Share screen" aria-keyshortcuts="Control+Shift+S">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <polyline points="8 21 12 17 16 21"/>
+        </svg>
+      </button>
       <button id="btn-chat" type="button" aria-pressed="false" aria-label="Toggle chat">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
         </svg>
       </button>
-      <button id="btn-log" type="button" aria-pressed="false" aria-label="Toggle debug log" hidden>
+      <button id="btn-log" type="button" aria-pressed="false" aria-label="Toggle debug log" aria-keyshortcuts="Control+Shift+L">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <line x1="8" y1="6" x2="21" y2="6"/>
           <line x1="8" y1="12" x2="21" y2="12"/>
@@ -249,6 +255,7 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     nickname: string
     relayActive?: boolean
     relayInterval?: ReturnType<typeof setInterval>
+    relaySourceVideo?: HTMLVideoElement
     relayImg?: HTMLImageElement
     lastImgUrl?: string
     audioCtx?: AudioContext
@@ -258,6 +265,8 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   }>()
 
   let localStream: MediaStream | undefined
+  let displayStream: MediaStream | undefined
+  let isSharing = false
   let userId = ''
   let ws: WebSocket
   let audioMuted = false
@@ -405,7 +414,13 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       sourceVideo.srcObject = new MediaStream([videoTrack])
       sourceVideo.muted = true
       sourceVideo.playsInline = true
+      sourceVideo.className = 'relay-source'
+      sourceVideo.setAttribute('data-peer-id', remoteId)
+      // Attach (hidden) so the track is playable across browsers and
+      // discoverable by E2E assertions scoped past #local-video.
+      document.body.appendChild(sourceVideo)
       sourceVideo.play().catch(() => {})
+      peer.relaySourceVideo = sourceVideo
 
       const canvas = document.createElement('canvas')
       const ctx = canvas.getContext('2d')
@@ -575,6 +590,10 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     if (!peer) return
     peer.pc.close()
     if (peer.relayInterval) clearInterval(peer.relayInterval)
+    if (peer.relaySourceVideo) {
+      peer.relaySourceVideo.srcObject = null
+      peer.relaySourceVideo.remove()
+    }
     if (peer.audioProcessor) {
       try { peer.audioProcessor.disconnect() } catch {}
     }
@@ -734,6 +753,76 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     log(videoMuted ? 'Camera off' : 'Camera on')
   }
 
+  const swapOutgoingVideoTrack = async (track: MediaStreamTrack): Promise<void> => {
+    for (const peer of peers.values()) {
+      const sender = peer.pc
+        .getSenders()
+        .find(s => s.track?.kind === 'video')
+      if (sender) await sender.replaceTrack(track)
+      if (peer.relayActive && peer.relaySourceVideo) {
+        peer.relaySourceVideo.srcObject = new MediaStream([track])
+        peer.relaySourceVideo.play().catch(() => {})
+      }
+    }
+  }
+
+  const stopShare = async (): Promise<void> => {
+    if (!isSharing) return
+    isSharing = false
+    displayStream?.getTracks().forEach(t => t.stop())
+    displayStream = undefined
+    const camTrack = localStream?.getVideoTracks()[0]
+    if (camTrack) {
+      camTrack.enabled = !videoMuted
+      await swapOutgoingVideoTrack(camTrack)
+    }
+    const localVideo = $<HTMLVideoElement>('#local-video')
+    if (localVideo && localStream) localVideo.srcObject = localStream
+    const btn = $('#btn-share')
+    if (btn) btn.setAttribute('aria-pressed', 'false')
+    log('Screen share stopped')
+  }
+
+  const startShare = async (): Promise<void> => {
+    if (isSharing) return
+    try {
+      const stream = await globalThis.navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      })
+      const newTrack = stream.getVideoTracks()[0]
+      if (!newTrack) {
+        stream.getTracks().forEach(t => t.stop())
+        return
+      }
+      displayStream = stream
+      isSharing = true
+      await swapOutgoingVideoTrack(newTrack)
+      const localVideo = $<HTMLVideoElement>('#local-video')
+      if (localVideo) localVideo.srcObject = stream
+      const camTrack = localStream?.getVideoTracks()[0]
+      if (camTrack) camTrack.enabled = false
+      // Sync button state when the user stops sharing via browser chrome.
+      newTrack.addEventListener('ended', () => { void stopShare() }, { once: true })
+      const btn = $('#btn-share')
+      if (btn) btn.setAttribute('aria-pressed', 'true')
+      log('Screen share started', 'success')
+    } catch (err) {
+      const name = (err as { name?: string } | null)?.name ?? ''
+      if (name !== 'NotAllowedError' && name !== 'AbortError') {
+        log(`Screen share failed: ${name || 'unknown'}`, 'error')
+      }
+    }
+  }
+
+  const toggleShare = (): void => {
+    if (isSharing) {
+      void stopShare()
+    } else {
+      void startShare()
+    }
+  }
+
   const leaveRoom = () => {
     peers.forEach((_, id) => removeRemotePeer(id))
     localStream?.getTracks().forEach(t => t.stop())
@@ -836,14 +925,36 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     /* controls */
     $('#btn-mic')?.addEventListener('click', toggleMic)
     $('#btn-cam')?.addEventListener('click', toggleCam)
+    $('#btn-share')?.addEventListener('click', toggleShare)
     $('#btn-leave')?.addEventListener('click', leaveRoom)
 
-    /* show debug log button only with ?debug=1 */
-    const debugMode = new URLSearchParams(globalThis.location.search).get('debug') === '1'
-    if (debugMode) {
-      const logBtn = $('#btn-log')
-      if (logBtn) logBtn.hidden = false
+    /* keyboard shortcut: Ctrl+Shift+L toggles the log panel.
+       Guarded against text inputs so it doesn't hijack typing. */
+    const isTextEditingTarget = (el: EventTarget | null): boolean => {
+      if (!(el instanceof HTMLElement)) return false
+      const tag = el.tagName
+      return (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        el.isContentEditable
+      )
     }
+    const toggleLogPanel = (): void => {
+      const logBtn = $('#btn-log')
+      const logPanel = $('#log-panel')
+      const chatPanel = $('#chat-panel')
+      const isOpen = logPanel?.classList.toggle('hidden') === false
+      logBtn?.setAttribute('aria-pressed', String(isOpen))
+      chatPanel?.classList.add('hidden')
+      $('#btn-chat')?.setAttribute('aria-pressed', 'false')
+    }
+    document.addEventListener('keydown', e => {
+      if (isTextEditingTarget(e.target)) return
+      if (e.ctrlKey && e.shiftKey && (e.key === 'L' || e.key === 'l')) {
+        e.preventDefault()
+        toggleLogPanel()
+      }
+    })
 
     /* panels */
     $('#btn-chat')?.addEventListener('click', () => {
@@ -936,11 +1047,23 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     position: relative;
     display: flex;
     flex-direction: column;
-    height: calc(100dvh - 60px);
+    height: calc(100dvh - var(--header-height, 60px));
     width: 100%;
     max-width: 100%;
     min-width: 0;
     overflow: hidden;
+  }
+  /* Hidden source <video> for the WS relay path — kept in the DOM so
+     the track plays reliably across browsers and so E2E can scope
+     past #local-video to verify the relay source is live. */
+  :global(video.relay-source) {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+    top: -9999px;
+    left: -9999px;
   }
   #toolbar, #controls {
     flex: 0 0 auto;
@@ -1062,12 +1185,13 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   /* ── video area ── */
   #video-area {
     position: relative;
-    background: hsl(0, 0%, 8%);
+    background: var(--color-surface-video);
     overflow: hidden;
     min-width: 0;
     min-height: 0;
     width: 100%;
     max-width: 100%;
+    transition: background var(--transition-base);
   }
 
   #remote-grid {
@@ -1119,7 +1243,7 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     .side-panel {
       width: calc(100vw - 24px);
       right: 12px;
-      top: 64px;
+      top: calc(var(--header-height, 60px) + 8px);
     }
   }
   #remote-grid:empty::after {
@@ -1135,13 +1259,14 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
 
   :global(.remote-peer) {
     position: relative;
-    background: hsl(0, 0%, 12%);
+    background: var(--color-surface-panel);
     border-radius: var(--radius-sm);
     overflow: hidden;
     min-height: 0;
     min-width: 0;
     max-width: 100%;
     max-height: 100%;
+    transition: background var(--transition-base);
   }
   :global(.remote-peer video),
   :global(.relay-img) {
@@ -1269,18 +1394,23 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   /* ── side panels ── */
   .side-panel {
     position: fixed;
-    top: 60px;
+    top: calc(var(--header-height, 60px) + 8px);
     right: 16px;
-    bottom: 60px;
+    bottom: 80px;
     width: 360px;
-    background: rgba(0, 0, 0, 0.85);
+    background: var(--color-surface-panel);
     backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
+    color: var(--color-text-primary);
     display: flex;
     flex-direction: column;
     z-index: 50;
-    transition: transform var(--transition-base), opacity var(--transition-base);
+    transition:
+      transform var(--transition-base),
+      opacity var(--transition-base),
+      background var(--transition-base),
+      top var(--transition-base);
     box-shadow: var(--shadow-lg);
   }
   .side-panel.hidden {
