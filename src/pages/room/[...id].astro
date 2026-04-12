@@ -89,6 +89,10 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     relayActive?: boolean
     relayInterval?: ReturnType<typeof setInterval>
     relayCanvas?: HTMLCanvasElement
+    audioCtx?: AudioContext
+    audioProcessor?: ScriptProcessorNode
+    playbackCtx?: AudioContext
+    nextPlayTime?: number
   }>()
 
   let localStream: MediaStream | undefined
@@ -161,12 +165,29 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     return pc
   }
 
-  /* ── WebSocket frame relay using Canvas + JPEG ── */
+  /* ── WebSocket frame relay: video (JPEG) + audio (PCM16) ── */
   const PEER_ID_BYTES = 36
   const RELAY_FPS = 10
   const RELAY_QUALITY = 0.6
   const RELAY_WIDTH = 320
   const RELAY_HEIGHT = 240
+  const AUDIO_SAMPLE_RATE = 16000
+  const AUDIO_BUFFER_SIZE = 2048
+  const TYPE_VIDEO = 0x76 // 'v'
+  const TYPE_AUDIO = 0x61 // 'a'
+
+  const buildFrame = (
+    targetId: string,
+    type: number,
+    payload: ArrayBuffer
+  ): ArrayBuffer => {
+    const header = new TextEncoder().encode(targetId)
+    const frame = new Uint8Array(PEER_ID_BYTES + 1 + payload.byteLength)
+    frame.set(header, 0)
+    frame[PEER_ID_BYTES] = type
+    frame.set(new Uint8Array(payload), PEER_ID_BYTES + 1)
+    return frame.buffer
+  }
 
   const startRelay = (remoteId: string) => {
     const peer = peers.get(remoteId)
@@ -179,76 +200,134 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     }
 
     const videoTrack = localStream.getVideoTracks()[0]
-    if (!videoTrack) {
-      log('No video track for relay', 'error')
-      return
-    }
+    const audioTrack = localStream.getAudioTracks()[0]
 
-    const sourceVideo = document.createElement('video')
-    sourceVideo.srcObject = new MediaStream([videoTrack])
-    sourceVideo.muted = true
-    sourceVideo.playsInline = true
-    sourceVideo.play().catch(() => {})
+    /* ── video relay ── */
+    if (videoTrack) {
+      const sourceVideo = document.createElement('video')
+      sourceVideo.srcObject = new MediaStream([videoTrack])
+      sourceVideo.muted = true
+      sourceVideo.playsInline = true
+      sourceVideo.play().catch(() => {})
 
-    const canvas = document.createElement('canvas')
-    canvas.width = RELAY_WIDTH
-    canvas.height = RELAY_HEIGHT
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const headerBytes = new TextEncoder().encode(remoteId)
-
-    const captureAndSend = async () => {
-      if (!peer.relayActive || ws.readyState !== WebSocket.OPEN) return
-      try {
-        ctx.drawImage(sourceVideo, 0, 0, RELAY_WIDTH, RELAY_HEIGHT)
-        const blob = await new Promise<Blob | null>(resolve =>
-          canvas.toBlob(resolve, 'image/jpeg', RELAY_QUALITY)
-        )
-        if (!blob) return
-        const buf = await blob.arrayBuffer()
-        const frame = new Uint8Array(PEER_ID_BYTES + buf.byteLength)
-        frame.set(headerBytes, 0)
-        frame.set(new Uint8Array(buf), PEER_ID_BYTES)
-        ws.send(frame.buffer)
-      } catch (e) {
-        // ignore frame errors
-      }
-    }
-
-    const intervalId = setInterval(captureAndSend, 1000 / RELAY_FPS)
-    peer.relayInterval = intervalId
-    log(`Relay active → ${remoteId.slice(0, 8)} (${RELAY_FPS}fps JPEG)`, 'success')
-  }
-
-  const handleRelayData = (senderId: string, payload: ArrayBuffer) => {
-    const peer = peers.get(senderId)
-    if (!peer) return
-
-    if (!peer.relayCanvas) {
       const canvas = document.createElement('canvas')
       canvas.width = RELAY_WIDTH
       canvas.height = RELAY_HEIGHT
-      canvas.style.width = '100%'
-      canvas.style.height = '100%'
-      canvas.style.objectFit = 'cover'
-      peer.relayCanvas = canvas
-      peer.video.style.display = 'none'
-      peer.el.insertBefore(canvas, peer.video)
-      log(`Relay receiver ready for ${senderId.slice(0, 8)}`, 'success')
+      const ctx = canvas.getContext('2d')
+
+      const captureVideo = async () => {
+        if (!peer.relayActive || ws.readyState !== WebSocket.OPEN || !ctx) return
+        try {
+          ctx.drawImage(sourceVideo, 0, 0, RELAY_WIDTH, RELAY_HEIGHT)
+          const blob = await new Promise<Blob | null>(resolve =>
+            canvas.toBlob(resolve, 'image/jpeg', RELAY_QUALITY)
+          )
+          if (!blob) return
+          const buf = await blob.arrayBuffer()
+          ws.send(buildFrame(remoteId, TYPE_VIDEO, buf))
+        } catch {}
+      }
+
+      peer.relayInterval = setInterval(captureVideo, 1000 / RELAY_FPS)
     }
 
-    const blob = new Blob([payload], { type: 'image/jpeg' })
-    const url = URL.createObjectURL(blob)
-    const img = new Image()
-    img.onload = () => {
-      const ctx = peer.relayCanvas?.getContext('2d')
-      if (ctx && peer.relayCanvas) {
-        ctx.drawImage(img, 0, 0, peer.relayCanvas.width, peer.relayCanvas.height)
+    /* ── audio relay (PCM16 mono 16kHz) ── */
+    if (audioTrack) {
+      const AudioCtx = globalThis.AudioContext ??
+        (globalThis as Record<string, unknown>)['webkitAudioContext']
+      const audioCtx = new (AudioCtx as typeof AudioContext)({
+        sampleRate: AUDIO_SAMPLE_RATE,
+      })
+      const source = audioCtx.createMediaStreamSource(
+        new MediaStream([audioTrack])
+      )
+      const processor = audioCtx.createScriptProcessor(
+        AUDIO_BUFFER_SIZE, 1, 1
+      )
+
+      processor.onaudioprocess = e => {
+        if (!peer.relayActive || ws.readyState !== WebSocket.OPEN) return
+        const input = e.inputBuffer.getChannelData(0)
+        const pcm = new Int16Array(input.length)
+        for (let i = 0; i < input.length; i++) {
+          const s = Math.max(-1, Math.min(1, input[i]!))
+          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+        }
+        ws.send(buildFrame(remoteId, TYPE_AUDIO, pcm.buffer))
       }
-      URL.revokeObjectURL(url)
+
+      source.connect(processor)
+      processor.connect(audioCtx.destination)
+      peer.audioCtx = audioCtx
+      peer.audioProcessor = processor
     }
-    img.src = url
+
+    log(`Relay active → ${remoteId.slice(0, 8)} (video+audio)`, 'success')
+  }
+
+  const handleRelayData = (
+    senderId: string,
+    type: number,
+    payload: ArrayBuffer
+  ) => {
+    const peer = peers.get(senderId)
+    if (!peer) return
+
+    if (type === TYPE_VIDEO) {
+      if (!peer.relayCanvas) {
+        const canvas = document.createElement('canvas')
+        canvas.width = RELAY_WIDTH
+        canvas.height = RELAY_HEIGHT
+        canvas.className = 'relay-canvas'
+        peer.relayCanvas = canvas
+        peer.video.style.display = 'none'
+        peer.el.insertBefore(canvas, peer.video)
+        log(`Relay receiver ready for ${senderId.slice(0, 8)}`, 'success')
+      }
+
+      const blob = new Blob([payload], { type: 'image/jpeg' })
+      const url = URL.createObjectURL(blob)
+      const img = new Image()
+      img.onload = () => {
+        const ctx = peer.relayCanvas?.getContext('2d')
+        if (ctx && peer.relayCanvas) {
+          ctx.drawImage(img, 0, 0, peer.relayCanvas.width, peer.relayCanvas.height)
+        }
+        URL.revokeObjectURL(url)
+      }
+      img.src = url
+      return
+    }
+
+    if (type === TYPE_AUDIO) {
+      if (!peer.playbackCtx) {
+        const AudioCtx = globalThis.AudioContext ??
+          (globalThis as Record<string, unknown>)['webkitAudioContext']
+        peer.playbackCtx = new (AudioCtx as typeof AudioContext)({
+          sampleRate: AUDIO_SAMPLE_RATE,
+        })
+        peer.nextPlayTime = peer.playbackCtx.currentTime
+      }
+
+      const ctx = peer.playbackCtx
+      const pcm = new Int16Array(payload)
+      const float = new Float32Array(pcm.length)
+      for (let i = 0; i < pcm.length; i++) {
+        float[i] = pcm[i]! / (pcm[i]! < 0 ? 0x8000 : 0x7fff)
+      }
+
+      const buffer = ctx.createBuffer(1, float.length, AUDIO_SAMPLE_RATE)
+      buffer.copyToChannel(float, 0)
+
+      const src = ctx.createBufferSource()
+      src.buffer = buffer
+      src.connect(ctx.destination)
+
+      const now = ctx.currentTime
+      const startTime = Math.max(peer.nextPlayTime ?? now, now)
+      src.start(startTime)
+      peer.nextPlayTime = startTime + buffer.duration
+    }
   }
 
   const addRemotePeer = (remoteId: string): void => {
@@ -529,12 +608,13 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     ws.binaryType = 'arraybuffer'
     ws.addEventListener('message', e => {
       if (e.data instanceof ArrayBuffer) {
-        if (e.data.byteLength <= PEER_ID_BYTES) return
+        if (e.data.byteLength <= PEER_ID_BYTES + 1) return
         const senderId = new TextDecoder().decode(
           new Uint8Array(e.data, 0, PEER_ID_BYTES)
         )
-        const payload = e.data.slice(PEER_ID_BYTES)
-        handleRelayData(senderId, payload)
+        const type = new Uint8Array(e.data, PEER_ID_BYTES, 1)[0]
+        const payload = e.data.slice(PEER_ID_BYTES + 1)
+        handleRelayData(senderId, type ?? 0, payload)
       } else {
         handleSignalingMessage(e.data)
       }
@@ -612,11 +692,23 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     background: hsl(0, 0%, 12%);
     border-radius: var(--radius-sm);
     overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   :global(.remote-peer video) {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+  :global(.relay-canvas) {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    image-rendering: auto;
   }
   :global(.peer-label) {
     position: absolute;
