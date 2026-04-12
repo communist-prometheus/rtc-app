@@ -40,7 +40,15 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
         </svg>
         <span>Copy</span>
       </button>
+      <button id="btn-rename" type="button" aria-label="Change nickname">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>
+        <span>Rename</span>
+      </button>
       <span id="peer-count">0 participants</span>
+      <span id="connection-status" role="status" data-state="connecting" aria-live="polite">Connecting…</span>
     </nav>
 
     <main id="video-area">
@@ -263,21 +271,108 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     audioProcessor?: ScriptProcessorNode
     playbackCtx?: AudioContext
     nextPlayTime?: number
+    disconnectTimer?: ReturnType<typeof setTimeout>
+    iceTimer?: ReturnType<typeof setTimeout>
+    restartAttempts?: number
+    remoteTrackSeen?: boolean
   }>()
 
   let localStream: MediaStream | undefined
   let displayStream: MediaStream | undefined
   let isSharing = false
   let userId = ''
-  let ws: WebSocket
+  let ws: WebSocket | undefined
+  let wsUrl = ''
+  let wsAttempt = 0
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined
+  let heartbeatPongTimer: ReturnType<typeof setTimeout> | undefined
+  let lastHeartbeatSent = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let audioMuted = false
   let videoMuted = false
+  let localNicknameRef = ''
+  let shutdownRequested = false
 
   const iceServers: RTCIceServer[] = []
   const ICE_TIMEOUT_MS = 5000
+  const HEARTBEAT_INTERVAL_MS = 15_000
+  const HEARTBEAT_TIMEOUT_MS = 5_000
+  const WS_BACKOFF_MIN_MS = 500
+  const WS_BACKOFF_MAX_MS = 8_000
   const forceRelay = new URLSearchParams(globalThis.location.search).get('forceRelay') === '1'
 
+  const setConnState = (state: 'connecting' | 'connected' | 'reconnecting' | 'offline'): void => {
+    document.body.setAttribute('data-conn-state', state)
+    const el = $('#connection-status')
+    if (!el) return
+    el.setAttribute('data-state', state)
+    el.textContent =
+      state === 'connected' ? 'Connected' :
+      state === 'connecting' ? 'Connecting…' :
+      state === 'reconnecting' ? 'Reconnecting…' :
+      'Offline'
+  }
+
+  const sendWs = (msg: unknown): boolean => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    try {
+      ws.send(JSON.stringify(msg))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const sendWsBinary = (buf: ArrayBuffer): boolean => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    try {
+      ws.send(buf)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /* ── peer connection ── */
+  const restartPeerIce = async (remoteId: string): Promise<void> => {
+    const peer = peers.get(remoteId)
+    if (!peer) return
+    peer.restartAttempts = (peer.restartAttempts ?? 0) + 1
+    log(
+      `stability:ice:restart ${remoteId.slice(0, 8)} attempt=${String(peer.restartAttempts)}`,
+      'warn'
+    )
+    // Only the offerer (lexicographically smaller peer id) initiates.
+    if (userId && userId < remoteId) {
+      try {
+        peer.pc.restartIce()
+        const offer = await peer.pc.createOffer({ iceRestart: true })
+        await peer.pc.setLocalDescription(offer)
+        sendWs({
+          type: 'offer',
+          target: remoteId,
+          sdp: offer.sdp,
+        })
+      } catch (err) {
+        log(
+          `stability:ice:restart:failed ${(err as { name?: string } | null)?.name ?? 'unknown'}`,
+          'error'
+        )
+      }
+    }
+  }
+
+  const fallbackToRelay = (remoteId: string, reason: string): void => {
+    const peer = peers.get(remoteId)
+    if (!peer || peer.relayActive) return
+    log(
+      `stability:relay:fallback ${remoteId.slice(0, 8)} reason=${reason}`,
+      'warn'
+    )
+    notify('Using server relay')
+    startRelay(remoteId)
+  }
+
   const createPeerConnection = (remoteId: string): RTCPeerConnection => {
     const pc = new RTCPeerConnection({ iceServers })
 
@@ -287,13 +382,13 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
 
     pc.onicecandidate = e => {
       if (e.candidate) {
-        ws.send(JSON.stringify({
+        sendWs({
           type: 'ice-candidate',
           target: remoteId,
           candidate: e.candidate.candidate,
           sdpMid: e.candidate.sdpMid,
           sdpMLineIndex: e.candidate.sdpMLineIndex,
-        }))
+        })
       }
     }
 
@@ -302,6 +397,7 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       const peer = peers.get(remoteId)
       if (peer && e.streams[0]) {
         peer.video.srcObject = e.streams[0]
+        peer.remoteTrackSeen = true
       }
     }
 
@@ -310,26 +406,60 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       if (state !== 'connected' && state !== 'completed') {
         const peer = peers.get(remoteId)
         if (peer && !peer.relayActive) {
-          log(`P2P timeout, switching to WS relay for ${remoteId.slice(0, 8)}`, 'warn')
-          notify('Using server relay')
-          startRelay(remoteId)
+          fallbackToRelay(remoteId, 'p2p-timeout')
         }
       }
     }, ICE_TIMEOUT_MS)
 
     pc.oniceconnectionstatechange = () => {
-      log(`ICE ${remoteId.slice(0, 8)}: ${pc.iceConnectionState}`)
-      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      const state = pc.iceConnectionState
+      log(`ICE ${remoteId.slice(0, 8)}: ${state}`)
+      const peer = peers.get(remoteId)
+      if (!peer) return
+
+      if (state === 'connected' || state === 'completed') {
         clearTimeout(iceTimer)
-        log(`P2P established with ${remoteId.slice(0, 8)}`, 'success')
+        if (peer.disconnectTimer) {
+          clearTimeout(peer.disconnectTimer)
+          delete peer.disconnectTimer
+        }
+        peer.restartAttempts = 0
+        log(
+          `stability:ice:connected ${remoteId.slice(0, 8)}`,
+          'success'
+        )
+        return
       }
-      if (pc.iceConnectionState === 'failed') {
+
+      if (state === 'disconnected') {
+        // Transient — give it 4s to recover, then restart ICE.
+        if (peer.disconnectTimer) return
+        peer.disconnectTimer = setTimeout(() => {
+          delete peer.disconnectTimer
+          if (pc.iceConnectionState === 'disconnected') {
+            void restartPeerIce(remoteId)
+          }
+        }, 4000)
+        return
+      }
+
+      if (state === 'failed') {
         clearTimeout(iceTimer)
-        const peer = peers.get(remoteId)
-        if (peer && !peer.relayActive) {
-          log(`P2P failed, switching to WS relay for ${remoteId.slice(0, 8)}`, 'warn')
-          notify('Using server relay')
-          startRelay(remoteId)
+        if (peer.disconnectTimer) {
+          clearTimeout(peer.disconnectTimer)
+          delete peer.disconnectTimer
+        }
+        // Attempt ICE restart once before falling back to relay.
+        if ((peer.restartAttempts ?? 0) < 1) {
+          void restartPeerIce(remoteId)
+          setTimeout(() => {
+            if (pc.iceConnectionState !== 'connected' &&
+                pc.iceConnectionState !== 'completed') {
+              fallbackToRelay(remoteId, 'ice-failed')
+            }
+          }, 5000)
+        } else {
+          fallbackToRelay(remoteId, 'ice-failed')
         }
       }
     }
@@ -427,7 +557,13 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       const ctx = canvas.getContext('2d')
 
       const captureVideo = async () => {
-        if (!peer.relayActive || ws.readyState !== WebSocket.OPEN || !ctx) return
+        if (
+          !peer.relayActive ||
+          !ws ||
+          ws.readyState !== WebSocket.OPEN ||
+          !ctx ||
+          document.visibilityState === 'hidden'
+        ) return
         try {
           const vw = sourceVideo.videoWidth
           const vh = sourceVideo.videoHeight
@@ -445,7 +581,7 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
           )
           if (!blob) return
           const buf = await blob.arrayBuffer()
-          ws.send(buildVideoFrame(remoteId, w, h, buf))
+          sendWsBinary(buildVideoFrame(remoteId, w, h, buf))
         } catch {}
       }
 
@@ -467,14 +603,18 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       )
 
       processor.onaudioprocess = e => {
-        if (!peer.relayActive || ws.readyState !== WebSocket.OPEN) return
+        if (
+          !peer.relayActive ||
+          !ws ||
+          ws.readyState !== WebSocket.OPEN
+        ) return
         const input = e.inputBuffer.getChannelData(0)
         const pcm = new Int16Array(input.length)
         for (let i = 0; i < input.length; i++) {
           const s = Math.max(-1, Math.min(1, input[i]!))
           pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff
         }
-        ws.send(buildFrame(remoteId, TYPE_AUDIO, pcm.buffer))
+        sendWsBinary(buildFrame(remoteId, TYPE_AUDIO, pcm.buffer))
       }
 
       source.connect(processor)
@@ -623,11 +763,11 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     if (!peer) return
     const offer = await peer.pc.createOffer()
     await peer.pc.setLocalDescription(offer)
-    ws.send(JSON.stringify({
+    sendWs({
       type: 'offer',
       target: remoteId,
       sdp: offer.sdp,
-    }))
+    })
     log(`Offer sent to ${remoteId.slice(0, 8)}`)
   }
 
@@ -639,11 +779,11 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     await peer.pc.setRemoteDescription({ type: 'offer', sdp })
     const answer = await peer.pc.createAnswer()
     await peer.pc.setLocalDescription(answer)
-    ws.send(JSON.stringify({
+    sendWs({
       type: 'answer',
       target: from,
       sdp: answer.sdp,
-    }))
+    })
     log(`Answer sent to ${from.slice(0, 8)}`)
   }
 
@@ -715,6 +855,45 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
         const peer = peers.get(msg.from)
         const fromLabel = peer?.nickname ?? msg.from.slice(0, 8)
         addChatMessage(fromLabel, msg.text)
+        break
+      }
+      case 'peer-renamed': {
+        const peer = peers.get(msg.userId)
+        if (peer) {
+          peer.nickname = msg.nickname
+          const label = peer.el.querySelector<HTMLSpanElement>('.peer-label')
+          if (label) label.textContent = msg.nickname
+          log(
+            `stability:peer:nick:${msg.oldNickname}->${msg.nickname}`
+          )
+          notify(`${msg.oldNickname} is now ${msg.nickname}`)
+        }
+        break
+      }
+      case 'rename-ok': {
+        localNicknameRef = msg.nickname
+        try {
+          localStorage.setItem('rtc-less-nickname', msg.nickname)
+        } catch {}
+        const selfLabel = $('#self-label')
+        if (selfLabel) selfLabel.textContent = msg.nickname
+        log(`stability:rename:ok ${msg.nickname}`, 'success')
+        break
+      }
+      case 'rename-error': {
+        log(`stability:rename:error ${msg.code}`, 'error')
+        notify(
+          msg.code === 'NICKNAME_TAKEN'
+            ? `"${msg.nickname}" is already taken`
+            : 'Could not rename'
+        )
+        break
+      }
+      case 'pong': {
+        if (heartbeatPongTimer) {
+          clearTimeout(heartbeatPongTimer)
+          heartbeatPongTimer = undefined
+        }
         break
       }
     }
@@ -908,6 +1087,177 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     document.addEventListener('touchcancel', endDrag)
   }
 
+  /* ── resilience: heartbeat / reconnect / visibility / track recovery ── */
+  const stopHeartbeat = (): void => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    if (heartbeatPongTimer) clearTimeout(heartbeatPongTimer)
+    heartbeatTimer = undefined
+    heartbeatPongTimer = undefined
+  }
+
+  const startHeartbeat = (): void => {
+    stopHeartbeat()
+    heartbeatTimer = setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      lastHeartbeatSent = Date.now()
+      sendWs({ type: 'ping', t: lastHeartbeatSent })
+      heartbeatPongTimer = setTimeout(() => {
+        log('stability:ws:heartbeat:stale', 'warn')
+        try {
+          ws?.close(4000, 'heartbeat-timeout')
+        } catch {}
+      }, HEARTBEAT_TIMEOUT_MS)
+    }, HEARTBEAT_INTERVAL_MS)
+  }
+
+  const scheduleReconnect = (): void => {
+    if (shutdownRequested || reconnectTimer) return
+    if (document.visibilityState === 'hidden') {
+      // Wait for visibility resume — no point burning battery.
+      return
+    }
+    const base = Math.min(
+      WS_BACKOFF_MAX_MS,
+      WS_BACKOFF_MIN_MS * 2 ** wsAttempt
+    )
+    const jitter = base * (0.75 + Math.random() * 0.5)
+    wsAttempt++
+    setConnState('reconnecting')
+    log(
+      `stability:ws:reconnect:scheduled attempt=${String(wsAttempt)} in=${String(Math.round(jitter))}ms`,
+      'warn'
+    )
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined
+      void connectWs()
+    }, jitter)
+  }
+
+  const connectWs = async (): Promise<void> => {
+    if (shutdownRequested) return
+    setConnState(wsAttempt > 0 ? 'reconnecting' : 'connecting')
+    log(`Connecting to ${wsUrl}...`)
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch {
+      scheduleReconnect()
+      return
+    }
+    ws.binaryType = 'arraybuffer'
+    ws.addEventListener('open', () => {
+      wsAttempt = 0
+      setConnState('connected')
+      log('Signaling connected', 'success')
+      log('stability:ws:reconnected', 'success')
+      startHeartbeat()
+      // After a reconnect, re-check peer health so stuck peers recover.
+      for (const [remoteId, peer] of peers.entries()) {
+        const state = peer.pc.iceConnectionState
+        if (state === 'failed' || state === 'disconnected') {
+          void restartPeerIce(remoteId)
+        }
+      }
+    })
+    ws.addEventListener('close', () => {
+      stopHeartbeat()
+      log('Signaling disconnected', 'warn')
+      if (!shutdownRequested) {
+        setConnState('offline')
+        scheduleReconnect()
+      }
+    })
+    ws.addEventListener('error', () => {
+      log('Signaling error', 'error')
+    })
+    ws.addEventListener('message', e => {
+      if (e.data instanceof ArrayBuffer) {
+        if (e.data.byteLength <= PEER_ID_BYTES + 1) return
+        const senderId = new TextDecoder().decode(
+          new Uint8Array(e.data, 0, PEER_ID_BYTES)
+        )
+        const type = new Uint8Array(e.data, PEER_ID_BYTES, 1)[0]
+        const payload = e.data.slice(PEER_ID_BYTES + 1)
+        handleRelayData(senderId, type ?? 0, payload)
+      } else {
+        handleSignalingMessage(e.data)
+      }
+    })
+  }
+
+  const reacquireLocalTrack = async (kind: 'video' | 'audio'): Promise<void> => {
+    log(`stability:track:reacquire:${kind}:start`, 'warn')
+    try {
+      const fresh = await globalThis.navigator.mediaDevices.getUserMedia(
+        kind === 'video' ? { video: true } : { audio: true }
+      )
+      const newTrack = fresh.getTracks()[0]
+      if (!newTrack) return
+      // Swap on every peer sender.
+      for (const peer of peers.values()) {
+        const sender = peer.pc
+          .getSenders()
+          .find(s => s.track?.kind === kind)
+        if (sender) await sender.replaceTrack(newTrack)
+        if (kind === 'video' && peer.relayActive && peer.relaySourceVideo) {
+          peer.relaySourceVideo.srcObject = new MediaStream([newTrack])
+          peer.relaySourceVideo.play().catch(() => {})
+        }
+      }
+      if (localStream) {
+        const old = localStream.getTracks().find(t => t.kind === kind)
+        if (old) localStream.removeTrack(old)
+        localStream.addTrack(newTrack)
+      }
+      if (kind === 'video') {
+        const localVideo = $<HTMLVideoElement>('#local-video')
+        if (localVideo && localStream) localVideo.srcObject = localStream
+      }
+      attachTrackRecovery(newTrack, kind)
+      log(`stability:track:reacquire:${kind}:ok`, 'success')
+    } catch {
+      log(`stability:track:reacquire:${kind}:failed`, 'error')
+      notify(`${kind === 'video' ? 'Camera' : 'Microphone'} unavailable`)
+    }
+  }
+
+  const attachTrackRecovery = (
+    track: MediaStreamTrack,
+    kind: 'video' | 'audio'
+  ): void => {
+    track.addEventListener(
+      'ended',
+      () => {
+        log(`stability:track:ended:${kind}`, 'warn')
+        void reacquireLocalTrack(kind)
+      },
+      { once: true }
+    )
+  }
+
+  const handleVisibilityResume = (): void => {
+    log('stability:visibility:resume', 'warn')
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      wsAttempt = 0
+      scheduleReconnect()
+    }
+    if (localStream) {
+      for (const track of localStream.getTracks()) {
+        if (track.readyState === 'ended') {
+          void reacquireLocalTrack(
+            track.kind === 'video' ? 'video' : 'audio'
+          )
+        }
+      }
+    }
+    for (const [remoteId, peer] of peers.entries()) {
+      const state = peer.pc.iceConnectionState
+      if (state === 'disconnected' || state === 'failed') {
+        void restartPeerIce(remoteId)
+      }
+    }
+    log('stability:visibility:resume:recovered', 'success')
+  }
+
   /* ── init ── */
   const init = async () => {
     const roomId = getRoomId()
@@ -915,6 +1265,7 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     if (info) info.textContent = `Room: ${roomId.slice(0, 8)}...`
 
     const localNickname = await promptNickname(roomId)
+    localNicknameRef = localNickname
     log(`Joined as "${localNickname}"`, 'success')
 
     /* copy link */
@@ -987,14 +1338,22 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       const input = $<HTMLInputElement>('#chat-input')
       if (!input?.value.trim()) return
       const text = input.value.trim()
-      ws.send(JSON.stringify({ type: 'chat', text }))
-      addChatMessage(localNickname, text)
+      if (!sendWs({ type: 'chat', text })) {
+        notify('Disconnected — message not sent')
+        return
+      }
+      addChatMessage(localNicknameRef || localNickname, text)
       input.value = ''
     })
 
     /* draggable self-view */
     const selfView = $('#self-view')
     if (selfView) makeDraggable(selfView)
+
+    /* rename button */
+    $('#btn-rename')?.addEventListener('click', () => {
+      void openRenameDialog(roomId)
+    })
 
     /* acquire media */
     log('Requesting camera and microphone...')
@@ -1005,39 +1364,84 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       })
       const localVideo = $<HTMLVideoElement>('#local-video')
       if (localVideo) localVideo.srcObject = localStream
+      for (const track of localStream.getTracks()) {
+        attachTrackRecovery(
+          track,
+          track.kind === 'video' ? 'video' : 'audio'
+        )
+      }
       log('Camera acquired', 'success')
     } catch {
       log('Camera unavailable. Joining without video.', 'warn')
     }
 
-    /* connect signaling */
+    /* connect signaling (resilient) */
     const proto = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${getSignalHost()}/ws/room/${roomId}?nickname=${encodeURIComponent(localNickname)}`
-    log(`Connecting to ${url}...`)
+    wsUrl = `${proto}//${getSignalHost()}/ws/room/${roomId}?nickname=${encodeURIComponent(localNickname)}`
+    await connectWs()
 
-    ws = new WebSocket(url)
-    ws.addEventListener('open', () => log('Signaling connected', 'success'))
-    ws.addEventListener('close', () => {
-      log('Signaling disconnected', 'warn')
-      notify('Disconnected from server')
-    })
-    ws.addEventListener('error', () => log('Signaling error', 'error'))
-    ws.binaryType = 'arraybuffer'
-    ws.addEventListener('message', e => {
-      if (e.data instanceof ArrayBuffer) {
-        if (e.data.byteLength <= PEER_ID_BYTES + 1) return
-        const senderId = new TextDecoder().decode(
-          new Uint8Array(e.data, 0, PEER_ID_BYTES)
-        )
-        const type = new Uint8Array(e.data, PEER_ID_BYTES, 1)[0]
-        const payload = e.data.slice(PEER_ID_BYTES + 1)
-        handleRelayData(senderId, type ?? 0, payload)
+    /* visibility handling: on resume, re-check everything. */
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        handleVisibilityResume()
       } else {
-        handleSignalingMessage(e.data)
+        log('stability:visibility:hidden')
       }
     })
 
+    /* graceful shutdown */
+    globalThis.addEventListener('pagehide', () => {
+      shutdownRequested = true
+      stopHeartbeat()
+      try { ws?.close(1000, 'pagehide') } catch {}
+    })
+
     updatePeerCount()
+
+    /* e2e debug surface — safe to expose: same info is already visible
+       in DevTools. Tests poke this to simulate failure modes. */
+    ;(globalThis as Record<string, unknown>)['__rtc'] = {
+      get ws() { return ws },
+      get peers() { return peers },
+      get localStream() { return localStream },
+      get userId() { return userId },
+      connectWs,
+      handleVisibilityResume,
+      reacquireLocalTrack,
+      restartPeerIce,
+    }
+  }
+
+  const openRenameDialog = async (_roomId: string): Promise<void> => {
+    const dialog = $<HTMLDialogElement>('#nickname-dialog')
+    const input = $<HTMLInputElement>('#nickname-input')
+    const title = $<HTMLElement>('#nickname-title')
+    if (!dialog || !input || !title) return
+    title.textContent = 'Change your nickname'
+    input.value = localNicknameRef
+    dialog.showModal()
+    requestAnimationFrame(() => {
+      input.focus()
+      input.select()
+    })
+    const form = $<HTMLFormElement>('#nickname-form')
+    if (!form) return
+    const submit = (e: Event): void => {
+      e.preventDefault()
+      const newNick = input.value.trim()
+      if (!newNick || newNick.length > 32) return
+      if (newNick === localNicknameRef) {
+        dialog.close()
+        return
+      }
+      if (!sendWs({ type: 'rename', nickname: newNick })) {
+        notify('Disconnected — rename not sent')
+        return
+      }
+      dialog.close()
+      form.removeEventListener('submit', submit)
+    }
+    form.addEventListener('submit', submit)
   }
 
   void init()
@@ -1089,8 +1493,10 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
   #toolbar button {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 4px;
-    padding: 0.25rem 0.75rem;
+    padding: 0.375rem 0.875rem;
+    min-height: 44px;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     background: var(--color-surface);
@@ -1104,6 +1510,8 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
 
   /* ── nickname dialog ── */
   #nickname-dialog {
+    margin: auto;
+    inset: 0;
     border: none;
     border-radius: var(--radius-md);
     padding: 0;
@@ -1175,12 +1583,69 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     20%, 60% { transform: translateX(-6px); }
     40%, 80% { transform: translateX(6px); }
   }
-  #nickname-form.shake {
-    animation: shake 0.35s ease-in-out;
+  @media (prefers-reduced-motion: no-preference) {
+    #nickname-form.shake {
+      animation: shake 0.35s ease-in-out;
+    }
   }
   #peer-count {
     color: var(--color-text-secondary);
     margin-left: auto;
+  }
+  #connection-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    flex-shrink: 0;
+    margin-left: var(--spacing-xs);
+    white-space: nowrap;
+  }
+  #connection-status::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  #connection-status[data-state="connecting"],
+  #connection-status[data-state="reconnecting"] {
+    color: hsl(40, 90%, 45%);
+    background: hsl(40, 90%, 90%);
+  }
+  :global(:root[data-theme="dark"]) #connection-status[data-state="connecting"],
+  :global(:root[data-theme="dark"]) #connection-status[data-state="reconnecting"] {
+    color: hsl(40, 90%, 70%);
+    background: hsl(40, 50%, 20%);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    #connection-status[data-state="connecting"]::before {
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  #connection-status[data-state="connected"] {
+    color: hsl(140, 60%, 35%);
+    background: hsl(140, 60%, 92%);
+  }
+  :global(:root[data-theme="dark"]) #connection-status[data-state="connected"] {
+    color: hsl(140, 60%, 70%);
+    background: hsl(140, 40%, 18%);
+  }
+  #connection-status[data-state="offline"] {
+    color: hsl(0, 70%, 45%);
+    background: hsl(0, 70%, 93%);
+  }
+  :global(:root[data-theme="dark"]) #connection-status[data-state="offline"] {
+    color: hsl(0, 75%, 70%);
+    background: hsl(0, 60%, 22%);
   }
 
   /* ── video area ── */
