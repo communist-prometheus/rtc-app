@@ -87,10 +87,8 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     el: HTMLElement
     video: HTMLVideoElement
     relayActive?: boolean
-    recorder?: MediaRecorder
-    mediaSource?: MediaSource
-    sourceBuffer?: SourceBuffer
-    pendingChunks?: ArrayBuffer[]
+    relayInterval?: ReturnType<typeof setInterval>
+    relayCanvas?: HTMLCanvasElement
   }>()
 
   let localStream: MediaStream | undefined
@@ -101,6 +99,7 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
 
   const iceServers: RTCIceServer[] = []
   const ICE_TIMEOUT_MS = 5000
+  const forceRelay = new URLSearchParams(globalThis.location.search).get('forceRelay') === '1'
 
   /* ── peer connection ── */
   const createPeerConnection = (remoteId: string): RTCPeerConnection => {
@@ -162,72 +161,102 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     return pc
   }
 
-  /* ── WebSocket media relay (fallback) ── */
+  /* ── WebSocket frame relay using Canvas + JPEG ── */
   const PEER_ID_BYTES = 36
-  const RELAY_CHUNK_MS = 200
+  const RELAY_FPS = 10
+  const RELAY_QUALITY = 0.6
+  const RELAY_WIDTH = 320
+  const RELAY_HEIGHT = 240
 
   const startRelay = (remoteId: string) => {
     const peer = peers.get(remoteId)
     if (!peer || peer.relayActive) return
     peer.relayActive = true
 
-    if (!localStream) return
-
-    const recorder = new MediaRecorder(localStream, {
-      mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
-        ? 'video/webm;codecs=vp8,opus'
-        : 'video/webm',
-      videoBitsPerSecond: 500_000,
-    })
-
-    recorder.ondataavailable = async e => {
-      if (e.data.size === 0 || ws.readyState !== WebSocket.OPEN) return
-      const buf = await e.data.arrayBuffer()
-      const header = new TextEncoder().encode(remoteId)
-      const frame = new Uint8Array(PEER_ID_BYTES + buf.byteLength)
-      frame.set(header, 0)
-      frame.set(new Uint8Array(buf), PEER_ID_BYTES)
-      ws.send(frame.buffer)
+    if (!localStream) {
+      log('No local stream for relay', 'error')
+      return
     }
 
-    recorder.start(RELAY_CHUNK_MS)
-    peer.recorder = recorder
-    log(`Relay active → ${remoteId.slice(0, 8)}`, 'success')
+    const videoTrack = localStream.getVideoTracks()[0]
+    if (!videoTrack) {
+      log('No video track for relay', 'error')
+      return
+    }
+
+    const sourceVideo = document.createElement('video')
+    sourceVideo.srcObject = new MediaStream([videoTrack])
+    sourceVideo.muted = true
+    sourceVideo.playsInline = true
+    sourceVideo.play().catch(() => {})
+
+    const canvas = document.createElement('canvas')
+    canvas.width = RELAY_WIDTH
+    canvas.height = RELAY_HEIGHT
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const headerBytes = new TextEncoder().encode(remoteId)
+
+    const captureAndSend = async () => {
+      if (!peer.relayActive || ws.readyState !== WebSocket.OPEN) return
+      try {
+        ctx.drawImage(sourceVideo, 0, 0, RELAY_WIDTH, RELAY_HEIGHT)
+        const blob = await new Promise<Blob | null>(resolve =>
+          canvas.toBlob(resolve, 'image/jpeg', RELAY_QUALITY)
+        )
+        if (!blob) return
+        const buf = await blob.arrayBuffer()
+        const frame = new Uint8Array(PEER_ID_BYTES + buf.byteLength)
+        frame.set(headerBytes, 0)
+        frame.set(new Uint8Array(buf), PEER_ID_BYTES)
+        ws.send(frame.buffer)
+      } catch (e) {
+        // ignore frame errors
+      }
+    }
+
+    const intervalId = setInterval(captureAndSend, 1000 / RELAY_FPS)
+    peer.relayInterval = intervalId
+    log(`Relay active → ${remoteId.slice(0, 8)} (${RELAY_FPS}fps JPEG)`, 'success')
   }
 
   const handleRelayData = (senderId: string, payload: ArrayBuffer) => {
     const peer = peers.get(senderId)
     if (!peer) return
 
-    if (!peer.mediaSource) {
-      const ms = new MediaSource()
-      peer.video.src = URL.createObjectURL(ms)
-      peer.mediaSource = ms
-
-      ms.addEventListener('sourceopen', () => {
-        const mime = 'video/webm;codecs=vp8,opus'
-        if (!MediaSource.isTypeSupported(mime)) return
-        const sb = ms.addSourceBuffer(mime)
-        peer.sourceBuffer = sb
-        sb.mode = 'sequence'
-
-        for (const chunk of peer.pendingChunks ?? []) {
-          if (!sb.updating) sb.appendBuffer(chunk)
-        }
-        peer.pendingChunks = []
-      })
+    if (!peer.relayCanvas) {
+      const canvas = document.createElement('canvas')
+      canvas.width = RELAY_WIDTH
+      canvas.height = RELAY_HEIGHT
+      canvas.style.width = '100%'
+      canvas.style.height = '100%'
+      canvas.style.objectFit = 'cover'
+      peer.relayCanvas = canvas
+      peer.video.style.display = 'none'
+      peer.el.insertBefore(canvas, peer.video)
+      log(`Relay receiver ready for ${senderId.slice(0, 8)}`, 'success')
     }
 
-    if (peer.sourceBuffer && !peer.sourceBuffer.updating) {
-      peer.sourceBuffer.appendBuffer(payload)
-    } else {
-      peer.pendingChunks = peer.pendingChunks ?? []
-      peer.pendingChunks.push(payload)
+    const blob = new Blob([payload], { type: 'image/jpeg' })
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      const ctx = peer.relayCanvas?.getContext('2d')
+      if (ctx && peer.relayCanvas) {
+        ctx.drawImage(img, 0, 0, peer.relayCanvas.width, peer.relayCanvas.height)
+      }
+      URL.revokeObjectURL(url)
     }
+    img.src = url
   }
 
   const addRemotePeer = (remoteId: string): void => {
     if (peers.has(remoteId)) return
+
+    if (forceRelay) {
+      log(`Force relay mode for ${remoteId.slice(0, 8)}`, 'warn')
+    }
 
     const el = document.createElement('article')
     el.className = 'remote-peer'
@@ -248,6 +277,10 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     const pc = createPeerConnection(remoteId)
     peers.set(remoteId, { pc, el, video })
     updatePeerCount()
+
+    if (forceRelay) {
+      startRelay(remoteId)
+    }
   }
 
   const removeRemotePeer = (remoteId: string): void => {
@@ -320,7 +353,9 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
         const others = (msg.users as string[]).filter(id => id !== userId)
         for (const id of others) {
           addRemotePeer(id)
-          await sendOffer(id)
+          if (!forceRelay) {
+            await sendOffer(id)
+          }
         }
         break
       }
