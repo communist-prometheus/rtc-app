@@ -75,12 +75,12 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
           <line x1="3" y1="3" x2="21" y2="21" stroke-width="2.5"/>
         </svg>
       </button>
-      <button id="btn-chat" type="button" aria-label="Toggle chat">
+      <button id="btn-chat" type="button" aria-pressed="false" aria-label="Toggle chat">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
         </svg>
       </button>
-      <button id="btn-log" type="button" aria-label="Toggle debug log">
+      <button id="btn-log" type="button" aria-pressed="false" aria-label="Toggle debug log" hidden>
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <line x1="8" y1="6" x2="21" y2="6"/>
           <line x1="8" y1="12" x2="21" y2="12"/>
@@ -192,33 +192,52 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     const error = $<HTMLElement>('#nickname-error')
     if (!dialog || !form || !input || !error) throw new Error('dialog missing')
 
-    const saved = localStorage.getItem('rtc-less-nickname')
+    const savedKey = `rtc-less-nickname:${roomId}`
+    const saved = localStorage.getItem(savedKey) ?? localStorage.getItem('rtc-less-nickname')
     if (saved) input.value = saved
 
+    const card = form
     dialog.showModal()
-    input.focus()
+    requestAnimationFrame(() => input.focus())
 
     return new Promise<string>(resolve => {
+      const cleanup = () => {
+        form.removeEventListener('submit', submit)
+        dialog.removeEventListener('cancel', cancel)
+      }
+      const cancel = (e: Event) => {
+        e.preventDefault()
+        input.focus()
+      }
       const submit = async (e: Event) => {
         e.preventDefault()
         const nickname = input.value.trim()
-        if (!nickname) return
+        if (!nickname || nickname.length > 32) {
+          error.hidden = false
+          const errText = $<HTMLElement>('#nickname-error-text')
+          if (errText) errText.textContent = 'Please enter a valid nickname (1-32 chars).'
+          return
+        }
         error.hidden = true
         const available = await checkNicknameAvailable(roomId, nickname)
         if (!available) {
           error.hidden = false
-          dialog.classList.remove('shake')
-          void dialog.offsetWidth
-          dialog.classList.add('shake')
+          const errText = $<HTMLElement>('#nickname-error-text')
+          if (errText) errText.textContent = 'This nickname is already taken in this room.'
+          card.classList.remove('shake')
+          void card.offsetWidth
+          card.classList.add('shake')
           input.select()
           return
         }
+        localStorage.setItem(savedKey, nickname)
         localStorage.setItem('rtc-less-nickname', nickname)
-        form.removeEventListener('submit', submit)
+        cleanup()
         dialog.close()
         resolve(nickname)
       }
       form.addEventListener('submit', submit)
+      dialog.addEventListener('cancel', cancel)
     })
   }
 
@@ -555,6 +574,19 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     const peer = peers.get(remoteId)
     if (!peer) return
     peer.pc.close()
+    if (peer.relayInterval) clearInterval(peer.relayInterval)
+    if (peer.audioProcessor) {
+      try { peer.audioProcessor.disconnect() } catch {}
+    }
+    if (peer.audioCtx) {
+      peer.audioCtx.close().catch(() => {})
+    }
+    if (peer.playbackCtx) {
+      peer.playbackCtx.close().catch(() => {})
+    }
+    if (peer.lastImgUrl) {
+      URL.revokeObjectURL(peer.lastImgUrl)
+    }
     peer.el.remove()
     peers.delete(remoteId)
     updatePeerCount()
@@ -671,7 +703,10 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   /* ── chat ── */
   const addChatMessage = (from: string, text: string) => {
     const li = document.createElement('li')
-    li.innerHTML = `<strong>${from}:</strong> ${text}`
+    const nameEl = document.createElement('strong')
+    nameEl.textContent = `${from}: `
+    li.appendChild(nameEl)
+    li.appendChild(document.createTextNode(text))
     $('#chat-messages')?.appendChild(li)
     li.scrollIntoView({ block: 'end' })
   }
@@ -800,19 +835,36 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     $('#btn-cam')?.addEventListener('click', toggleCam)
     $('#btn-leave')?.addEventListener('click', leaveRoom)
 
+    /* show debug log button only with ?debug=1 */
+    const debugMode = new URLSearchParams(globalThis.location.search).get('debug') === '1'
+    if (debugMode) {
+      const logBtn = $('#btn-log')
+      if (logBtn) logBtn.hidden = false
+    }
+
     /* panels */
     $('#btn-chat')?.addEventListener('click', () => {
-      $('#chat-panel')?.classList.toggle('hidden')
+      const chat = $('#chat-panel')
+      const isOpen = chat?.classList.toggle('hidden') === false
+      $('#btn-chat')?.setAttribute('aria-pressed', String(isOpen))
       $('#log-panel')?.classList.add('hidden')
+      $('#btn-log')?.setAttribute('aria-pressed', 'false')
     })
     $('#btn-log')?.addEventListener('click', () => {
-      $('#log-panel')?.classList.toggle('hidden')
+      const log = $('#log-panel')
+      const isOpen = log?.classList.toggle('hidden') === false
+      $('#btn-log')?.setAttribute('aria-pressed', String(isOpen))
       $('#chat-panel')?.classList.add('hidden')
+      $('#btn-chat')?.setAttribute('aria-pressed', 'false')
     })
-    $('#close-chat')?.addEventListener('click', () =>
-      $('#chat-panel')?.classList.add('hidden'))
-    $('#close-log')?.addEventListener('click', () =>
-      $('#log-panel')?.classList.add('hidden'))
+    $('#close-chat')?.addEventListener('click', () => {
+      $('#chat-panel')?.classList.add('hidden')
+      $('#btn-chat')?.setAttribute('aria-pressed', 'false')
+    })
+    $('#close-log')?.addEventListener('click', () => {
+      $('#log-panel')?.classList.add('hidden')
+      $('#btn-log')?.setAttribute('aria-pressed', 'false')
+    })
 
     /* chat form */
     $('#chat-form')?.addEventListener('submit', e => {
@@ -881,7 +933,7 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     position: relative;
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 60px);
+    height: calc(100dvh - 60px);
     width: 100%;
     max-width: 100%;
     min-width: 0;
@@ -960,8 +1012,9 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     transition: border-color var(--transition-fast);
     box-sizing: border-box;
   }
-  #nickname-input:focus {
-    outline: none;
+  #nickname-input:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
     border-color: var(--color-accent);
   }
   #nickname-submit {
@@ -995,7 +1048,7 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     20%, 60% { transform: translateX(-6px); }
     40%, 80% { transform: translateX(6px); }
   }
-  #nickname-dialog.shake {
+  #nickname-form.shake {
     animation: shake 0.35s ease-in-out;
   }
   #peer-count {
@@ -1156,6 +1209,9 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     background: var(--color-surface);
     border-top: 1px solid var(--color-border);
   }
+  #controls button[hidden] {
+    display: none;
+  }
   #controls button {
     width: 48px;
     height: 48px;
@@ -1171,8 +1227,12 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     transition: background var(--transition-fast), transform var(--transition-fast);
   }
   #controls button:hover {
-    background: var(--color-border);
+    background: var(--color-text-secondary);
+    color: var(--color-background);
     transform: scale(1.05);
+  }
+  #controls button:active {
+    transform: scale(0.96);
   }
   #controls button:focus-visible {
     outline: 2px solid var(--color-accent);
@@ -1180,6 +1240,7 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   }
   #controls button svg {
     flex-shrink: 0;
+    pointer-events: none;
   }
   #controls button .icon-off { display: none; }
   #controls button[aria-pressed="true"] {
@@ -1187,14 +1248,20 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     color: white;
     border-color: hsl(0, 70%, 35%);
   }
+  #controls button[aria-pressed="true"]:hover {
+    background: hsl(0, 70%, 38%);
+  }
   #controls button[aria-pressed="true"] .icon-on { display: none; }
   #controls button[aria-pressed="true"] .icon-off { display: block; }
   #btn-leave {
-    background: hsl(0, 70%, 48%) !important;
-    color: white !important;
-    border-color: hsl(0, 70%, 38%) !important;
+    background: hsl(0, 70%, 48%);
+    color: white;
+    border-color: hsl(0, 70%, 38%);
   }
-  #btn-leave:hover { background: hsl(0, 70%, 38%) !important; }
+  #btn-leave:hover {
+    background: hsl(0, 70%, 38%);
+    color: white;
+  }
 
   /* ── side panels ── */
   .side-panel {
