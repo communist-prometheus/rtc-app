@@ -151,6 +151,8 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
 </BaseLayout>
 
 <script>
+  import { telemetry } from '@/lib/telemetry'
+
   /* ── helpers ── */
   const $ = <T extends HTMLElement>(s: string) =>
     document.querySelector<T>(s)
@@ -280,6 +282,9 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   let displayStream: MediaStream | undefined
   let isSharing = false
   let userId = ''
+  let telemetrySessionId = ''
+  let telemetryConnectionId = ''
+  let qualityPollTimer: ReturnType<typeof setInterval> | undefined
   let ws: WebSocket | undefined
   let wsUrl = ''
   let wsAttempt = 0
@@ -427,6 +432,17 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
           `stability:ice:connected ${remoteId.slice(0, 8)}`,
           'success'
         )
+        if (telemetryConnectionId) {
+          void telemetry.trackIceEvent(
+            telemetryConnectionId,
+            'connected',
+            { 'ice.state': state, 'ice.peer': remoteId }
+          )
+          // First time we hit a connected ICE — start sampling stats.
+          // Polling earlier produces all-zero rows that skew the
+          // dashboard aggregates.
+          if (!qualityPollTimer) startQualityPolling()
+        }
         return
       }
 
@@ -447,6 +463,13 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
         if (peer.disconnectTimer) {
           clearTimeout(peer.disconnectTimer)
           delete peer.disconnectTimer
+        }
+        if (telemetryConnectionId) {
+          void telemetry.trackIceEvent(
+            telemetryConnectionId,
+            'failed',
+            { 'ice.state': state, 'ice.peer': remoteId }
+          )
         }
         // Attempt ICE restart once before falling back to relay.
         if ((peer.restartAttempts ?? 0) < 1) {
@@ -811,6 +834,18 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       case 'room-state': {
         userId = msg.userId
         log(`Joined as ${msg.nickname}. ${msg.users.length} in room.`, 'success')
+        // Telemetry: track this peer's connection in the session.
+        // Quality polling deliberately doesn't start here — it's
+        // gated on the first ICE 'connected' event so we don't push
+        // all-zero stats rows during negotiation.
+        if (telemetrySessionId && !telemetryConnectionId) {
+          telemetryConnectionId =
+            await telemetry.trackUserConnect(
+              telemetrySessionId,
+              userId,
+              msg.nickname ?? ''
+            )
+        }
         type User = { id: string; nickname: string }
         const others = (msg.users as User[]).filter(u => u.id !== userId)
         for (const u of others) {
@@ -1003,6 +1038,13 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
   }
 
   const leaveRoom = () => {
+    if (telemetryConnectionId) {
+      telemetry.trackUserDisconnectBeacon(telemetryConnectionId)
+    }
+    if (telemetrySessionId) {
+      telemetry.endRoomSessionBeacon(telemetrySessionId)
+    }
+    stopQualityPolling()
     peers.forEach((_, id) => removeRemotePeer(id))
     localStream?.getTracks().forEach(t => t.stop())
     ws?.close()
@@ -1233,6 +1275,70 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     )
   }
 
+  /* Poll RTCPeerConnection.getStats for the first connected remote
+     peer every 5s and push the result as a quality sample. */
+  const stopQualityPolling = (): void => {
+    if (qualityPollTimer) clearInterval(qualityPollTimer)
+    qualityPollTimer = undefined
+  }
+  const startQualityPolling = (): void => {
+    stopQualityPolling()
+    qualityPollTimer = setInterval(() => {
+      void sampleQuality()
+    }, 5000)
+  }
+  const sampleQuality = async (): Promise<void> => {
+    if (!telemetryConnectionId) return
+    const peer = peers.values().next().value as
+      | { pc: RTCPeerConnection }
+      | undefined
+    if (!peer) return
+    try {
+      const stats = await peer.pc.getStats()
+      let rttMs = 0
+      let jitterMs = 0
+      let packetLossPct = 0
+      let bitrateKbps = 0
+      let inboundBytes = 0
+      let inboundPackets = 0
+      let inboundLost = 0
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          const r = report as RTCIceCandidatePairStats & { currentRoundTripTime?: number }
+          if (typeof r.currentRoundTripTime === 'number') {
+            rttMs = r.currentRoundTripTime * 1000
+          }
+        }
+        if (report.type === 'inbound-rtp') {
+          const r = report as RTCInboundRtpStreamStats & {
+            bytesReceived?: number
+            packetsReceived?: number
+            packetsLost?: number
+            jitter?: number
+          }
+          if (typeof r.bytesReceived === 'number') inboundBytes += r.bytesReceived
+          if (typeof r.packetsReceived === 'number') inboundPackets += r.packetsReceived
+          if (typeof r.packetsLost === 'number') inboundLost += r.packetsLost
+          if (typeof r.jitter === 'number') jitterMs = Math.max(jitterMs, r.jitter * 1000)
+        }
+      })
+      bitrateKbps = (inboundBytes * 8) / 1000 / 5
+      const totalPackets = inboundPackets + inboundLost
+      packetLossPct =
+        totalPackets > 0 ? (inboundLost / totalPackets) * 100 : 0
+      void telemetry.pushQualitySample({
+        connectionId: telemetryConnectionId,
+        timestamp: new Date().toISOString(),
+        rttMs,
+        jitterMs,
+        packetLossPct,
+        bitrateKbps,
+      })
+    } catch {
+      /* ignore — telemetry must never break the call */
+    }
+  }
+
   const handleVisibilityResume = (): void => {
     log('stability:visibility:resume', 'warn')
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1266,6 +1372,16 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     const localNickname = await promptNickname(roomId)
     localNicknameRef = localNickname
     log(`Joined as "${localNickname}"`, 'success')
+
+    // Telemetry: start (or join) the room session record. The session
+    // id is the roomId itself so multiple peers in the same room
+    // share the row (collector uses INSERT OR IGNORE).
+    telemetrySessionId = roomId
+    void telemetry
+      .startRoomSession(roomId)
+      .catch(() => {
+        /* fire-and-forget */
+      })
 
     /* copy link */
     $('#copy-link')?.addEventListener('click', () => {
@@ -1392,6 +1508,13 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
     globalThis.addEventListener('pagehide', () => {
       shutdownRequested = true
       stopHeartbeat()
+      stopQualityPolling()
+      if (telemetryConnectionId) {
+        telemetry.trackUserDisconnectBeacon(telemetryConnectionId)
+      }
+      if (telemetrySessionId) {
+        telemetry.endRoomSessionBeacon(telemetrySessionId)
+      }
       try { ws?.close(1000, 'pagehide') } catch {}
     })
 
@@ -1404,6 +1527,11 @@ import BaseLayout from '@/layouts/BaseLayout.astro'
       get peers() { return peers },
       get localStream() { return localStream },
       get userId() { return userId },
+      get telemetryCalls() {
+        return (globalThis as Record<string, unknown>)['__telemetryCalls']
+      },
+      get telemetrySessionId() { return telemetrySessionId },
+      get telemetryConnectionId() { return telemetryConnectionId },
       connectWs,
       handleVisibilityResume,
       reacquireLocalTrack,
