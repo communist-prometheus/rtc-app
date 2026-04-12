@@ -6,44 +6,129 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
 
 <BaseLayout title="Room | rtc-less">
   <section id="room">
+    <dialog id="nickname-dialog" aria-labelledby="nickname-title">
+      <form method="dialog" id="nickname-form">
+        <h2 id="nickname-title">Enter your nickname</h2>
+        <p id="nickname-error" role="alert" hidden>
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/>
+            <line x1="12" y1="7" x2="12" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="12" cy="17" r="1" fill="currentColor"/>
+          </svg>
+          <span id="nickname-error-text">This nickname is already taken in this room.</span>
+        </p>
+        <input
+          id="nickname-input"
+          type="text"
+          required
+          autocomplete="off"
+          minlength="1"
+          maxlength="32"
+          placeholder="e.g. Alice"
+          aria-describedby="nickname-error"
+        />
+        <button id="nickname-submit" type="submit">Join Room</button>
+      </form>
+    </dialog>
+
     <nav id="toolbar">
       <output id="room-info">Loading...</output>
-      <button id="copy-link" type="button" title="Copy room link">Copy Link</button>
+      <button id="copy-link" type="button" aria-label="Copy room link">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+        <span>Copy</span>
+      </button>
       <span id="peer-count">0 participants</span>
     </nav>
 
     <main id="video-area">
       <section id="remote-grid"></section>
-      <aside id="self-view" draggable="true">
+      <aside id="self-view">
         <video id="local-video" autoplay muted playsinline></video>
         <span id="self-label">You</span>
       </aside>
     </main>
 
     <footer id="controls">
-      <button id="btn-mic" type="button" aria-pressed="false" title="Toggle microphone">Mic On</button>
-      <button id="btn-cam" type="button" aria-pressed="false" title="Toggle camera">Cam On</button>
-      <button id="btn-chat" type="button" title="Toggle chat">Chat</button>
-      <button id="btn-log" type="button" title="Toggle debug log">Log</button>
-      <button id="btn-leave" type="button" title="Leave call">Leave</button>
+      <button id="btn-mic" type="button" aria-pressed="false" aria-label="Mute microphone">
+        <svg class="icon-on" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="2" width="6" height="12" rx="3"/>
+          <path d="M5 10a7 7 0 0 0 14 0"/>
+          <line x1="12" y1="17" x2="12" y2="22"/>
+        </svg>
+        <svg class="icon-off" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="2" width="6" height="12" rx="3"/>
+          <path d="M5 10a7 7 0 0 0 14 0"/>
+          <line x1="12" y1="17" x2="12" y2="22"/>
+          <line x1="3" y1="3" x2="21" y2="21" stroke-width="2.5"/>
+        </svg>
+      </button>
+      <button id="btn-cam" type="button" aria-pressed="false" aria-label="Turn camera off">
+        <svg class="icon-on" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M23 7l-7 5 7 5V7z"/>
+          <rect x="1" y="5" width="15" height="14" rx="2"/>
+        </svg>
+        <svg class="icon-off" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M23 7l-7 5 7 5V7z"/>
+          <rect x="1" y="5" width="15" height="14" rx="2"/>
+          <line x1="3" y1="3" x2="21" y2="21" stroke-width="2.5"/>
+        </svg>
+      </button>
+      <button id="btn-chat" type="button" aria-label="Toggle chat">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </button>
+      <button id="btn-log" type="button" aria-label="Toggle debug log">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="8" y1="6" x2="21" y2="6"/>
+          <line x1="8" y1="12" x2="21" y2="12"/>
+          <line x1="8" y1="18" x2="21" y2="18"/>
+          <line x1="3" y1="6" x2="3.01" y2="6"/>
+          <line x1="3" y1="12" x2="3.01" y2="12"/>
+          <line x1="3" y1="18" x2="3.01" y2="18"/>
+        </svg>
+      </button>
+      <button id="btn-leave" type="button" aria-label="Leave call">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" transform="rotate(135 12 12)"/>
+        </svg>
+      </button>
     </footer>
 
     <aside id="chat-panel" class="side-panel hidden">
       <header>
         <h3>Chat</h3>
-        <button id="close-chat" type="button" aria-label="Close chat">x</button>
+        <button id="close-chat" type="button" aria-label="Close chat">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </header>
       <ol id="chat-messages"></ol>
       <form id="chat-form">
         <input id="chat-input" type="text" placeholder="Message..." autocomplete="off" />
-        <button type="submit">Send</button>
+        <button type="submit" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
       </form>
     </aside>
 
     <aside id="log-panel" class="side-panel hidden">
       <header>
         <h3>Debug Log</h3>
-        <button id="close-log" type="button" aria-label="Close log">x</button>
+        <button id="close-log" type="button" aria-label="Close log">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </header>
       <ol id="log-entries"></ol>
     </aside>
@@ -81,11 +166,69 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     return m?.[1] ?? globalThis.crypto.randomUUID()
   }
 
+  const getSignalHost = (): string =>
+    globalThis.location.port === '4321'
+      ? 'localhost:8787'
+      : 'signal.comprom.org'
+
+  const checkNicknameAvailable = async (
+    roomId: string,
+    nickname: string
+  ): Promise<boolean> => {
+    const proto = globalThis.location.protocol === 'https:' ? 'https:' : 'http:'
+    const url = `${proto}//${getSignalHost()}/api/check-nickname/${roomId}?nickname=${encodeURIComponent(nickname)}`
+    try {
+      const r = await fetch(url)
+      const d = await r.json() as { taken: boolean }
+      return !d.taken
+    } catch {
+      return true
+    }
+  }
+
+  const promptNickname = async (roomId: string): Promise<string> => {
+    const dialog = $<HTMLDialogElement>('#nickname-dialog')
+    const form = $<HTMLFormElement>('#nickname-form')
+    const input = $<HTMLInputElement>('#nickname-input')
+    const error = $<HTMLElement>('#nickname-error')
+    if (!dialog || !form || !input || !error) throw new Error('dialog missing')
+
+    const saved = localStorage.getItem('rtc-less-nickname')
+    if (saved) input.value = saved
+
+    dialog.showModal()
+    input.focus()
+
+    return new Promise<string>(resolve => {
+      const submit = async (e: Event) => {
+        e.preventDefault()
+        const nickname = input.value.trim()
+        if (!nickname) return
+        error.hidden = true
+        const available = await checkNicknameAvailable(roomId, nickname)
+        if (!available) {
+          error.hidden = false
+          dialog.classList.remove('shake')
+          void dialog.offsetWidth
+          dialog.classList.add('shake')
+          input.select()
+          return
+        }
+        localStorage.setItem('rtc-less-nickname', nickname)
+        form.removeEventListener('submit', submit)
+        dialog.close()
+        resolve(nickname)
+      }
+      form.addEventListener('submit', submit)
+    })
+  }
+
   /* ── state ── */
   const peers = new Map<string, {
     pc: RTCPeerConnection
     el: HTMLElement
     video: HTMLVideoElement
+    nickname: string
     relayActive?: boolean
     relayInterval?: ReturnType<typeof setInterval>
     relayImg?: HTMLImageElement
@@ -374,11 +517,14 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     }
   }
 
-  const addRemotePeer = (remoteId: string): void => {
+  const addRemotePeer = (
+    remoteId: string,
+    nickname: string
+  ): void => {
     if (peers.has(remoteId)) return
 
     if (forceRelay) {
-      log(`Force relay mode for ${remoteId.slice(0, 8)}`, 'warn')
+      log(`Force relay mode for ${nickname}`, 'warn')
     }
 
     const el = document.createElement('article')
@@ -391,14 +537,14 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
 
     const label = document.createElement('span')
     label.className = 'peer-label'
-    label.textContent = remoteId.slice(0, 8)
+    label.textContent = nickname
 
     el.appendChild(video)
     el.appendChild(label)
     $('#remote-grid')?.appendChild(el)
 
     const pc = createPeerConnection(remoteId)
-    peers.set(remoteId, { pc, el, video })
+    peers.set(remoteId, { pc, el, video, nickname })
     updatePeerCount()
 
     if (forceRelay) {
@@ -435,7 +581,9 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
   }
 
   const handleOffer = async (from: string, sdp: string) => {
-    addRemotePeer(from)
+    if (!peers.has(from)) {
+      addRemotePeer(from, from.slice(0, 8))
+    }
     const peer = peers.get(from)!
     await peer.pc.setRemoteDescription({ type: 'offer', sdp })
     const answer = await peer.pc.createAnswer()
@@ -472,25 +620,28 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     switch (msg.type) {
       case 'room-state': {
         userId = msg.userId
-        log(`Joined as ${userId.slice(0, 8)}. ${msg.users.length} in room.`, 'success')
-        const others = (msg.users as string[]).filter(id => id !== userId)
-        for (const id of others) {
-          addRemotePeer(id)
+        log(`Joined as ${msg.nickname}. ${msg.users.length} in room.`, 'success')
+        type User = { id: string; nickname: string }
+        const others = (msg.users as User[]).filter(u => u.id !== userId)
+        for (const u of others) {
+          addRemotePeer(u.id, u.nickname)
           if (!forceRelay) {
-            await sendOffer(id)
+            await sendOffer(u.id)
           }
         }
         break
       }
       case 'peer-joined': {
-        log(`${msg.userId.slice(0, 8)} joined`, 'success')
-        notify(`${msg.userId.slice(0, 8)} joined the room`)
-        addRemotePeer(msg.userId)
+        const nick = msg.nickname ?? msg.userId.slice(0, 8)
+        log(`${nick} joined`, 'success')
+        notify(`${nick} joined the room`)
+        addRemotePeer(msg.userId, nick)
         break
       }
       case 'peer-left': {
-        log(`${msg.userId.slice(0, 8)} left`, 'warn')
-        notify(`${msg.userId.slice(0, 8)} left the room`)
+        const nick = msg.nickname ?? msg.userId.slice(0, 8)
+        log(`${nick} left`, 'warn')
+        notify(`${nick} left the room`)
         removeRemotePeer(msg.userId)
         break
       }
@@ -510,7 +661,9 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
         break
       }
       case 'chat': {
-        addChatMessage(msg.from.slice(0, 8), msg.text)
+        const peer = peers.get(msg.from)
+        const fromLabel = peer?.nickname ?? msg.from.slice(0, 8)
+        addChatMessage(fromLabel, msg.text)
         break
       }
     }
@@ -530,8 +683,8 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     localStream?.getAudioTracks().forEach(t => { t.enabled = !audioMuted })
     const btn = $('#btn-mic')
     if (btn) {
-      btn.textContent = audioMuted ? 'Mic Off' : 'Mic On'
       btn.setAttribute('aria-pressed', String(audioMuted))
+      btn.setAttribute('aria-label', audioMuted ? 'Unmute microphone' : 'Mute microphone')
     }
     log(audioMuted ? 'Microphone muted' : 'Microphone unmuted')
   }
@@ -541,8 +694,8 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     localStream?.getVideoTracks().forEach(t => { t.enabled = !videoMuted })
     const btn = $('#btn-cam')
     if (btn) {
-      btn.textContent = videoMuted ? 'Cam Off' : 'Cam On'
       btn.setAttribute('aria-pressed', String(videoMuted))
+      btn.setAttribute('aria-label', videoMuted ? 'Turn camera on' : 'Turn camera off')
     }
     log(videoMuted ? 'Camera off' : 'Camera on')
   }
@@ -554,24 +707,78 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     globalThis.location.href = '/'
   }
 
-  /* ── draggable self-view ── */
+  /* ── draggable self-view (mouse + touch) ── */
   const makeDraggable = (el: HTMLElement) => {
-    let x = 0, y = 0, dragging = false
-    el.addEventListener('mousedown', e => {
+    let offsetX = 0
+    let offsetY = 0
+    let dragging = false
+
+    const clampPosition = (x: number, y: number) => {
+      const parent = el.parentElement
+      if (!parent) return { x, y }
+      const parentRect = parent.getBoundingClientRect()
+      const elRect = el.getBoundingClientRect()
+      const maxX = parentRect.width - elRect.width
+      const maxY = parentRect.height - elRect.height
+      return {
+        x: Math.max(0, Math.min(x, maxX)),
+        y: Math.max(0, Math.min(y, maxY)),
+      }
+    }
+
+    const startDrag = (clientX: number, clientY: number) => {
+      const parent = el.parentElement
+      if (!parent) return
+      const parentRect = parent.getBoundingClientRect()
+      const elRect = el.getBoundingClientRect()
+      offsetX = clientX - (elRect.left - parentRect.left)
+      offsetY = clientY - (elRect.top - parentRect.top)
+      el.style.right = 'auto'
+      el.style.bottom = 'auto'
+      el.style.left = `${elRect.left - parentRect.left}px`
+      el.style.top = `${elRect.top - parentRect.top}px`
       dragging = true
-      x = e.clientX - el.offsetLeft
-      y = e.clientY - el.offsetTop
-      el.style.cursor = 'grabbing'
-    })
-    document.addEventListener('mousemove', e => {
+      el.classList.add('dragging')
+    }
+
+    const moveDrag = (clientX: number, clientY: number) => {
       if (!dragging) return
-      el.style.left = `${e.clientX - x}px`
-      el.style.top = `${e.clientY - y}px`
-    })
-    document.addEventListener('mouseup', () => {
+      const parent = el.parentElement
+      if (!parent) return
+      const parentRect = parent.getBoundingClientRect()
+      const x = clientX - parentRect.left - offsetX
+      const y = clientY - parentRect.top - offsetY
+      const clamped = clampPosition(x, y)
+      el.style.left = `${clamped.x}px`
+      el.style.top = `${clamped.y}px`
+    }
+
+    const endDrag = () => {
       dragging = false
-      el.style.cursor = 'grab'
+      el.classList.remove('dragging')
+    }
+
+    el.addEventListener('mousedown', e => {
+      e.preventDefault()
+      startDrag(e.clientX, e.clientY)
     })
+    document.addEventListener('mousemove', e => moveDrag(e.clientX, e.clientY))
+    document.addEventListener('mouseup', endDrag)
+
+    el.addEventListener('touchstart', e => {
+      const t = e.touches[0]
+      if (!t) return
+      startDrag(t.clientX, t.clientY)
+    }, { passive: true })
+    document.addEventListener('touchmove', e => {
+      if (!dragging) return
+      const t = e.touches[0]
+      if (!t) return
+      e.preventDefault()
+      moveDrag(t.clientX, t.clientY)
+    }, { passive: false })
+    document.addEventListener('touchend', endDrag)
+    document.addEventListener('touchcancel', endDrag)
   }
 
   /* ── init ── */
@@ -579,6 +786,9 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     const roomId = getRoomId()
     const info = $('#room-info')
     if (info) info.textContent = `Room: ${roomId.slice(0, 8)}...`
+
+    const localNickname = await promptNickname(roomId)
+    log(`Joined as "${localNickname}"`, 'success')
 
     /* copy link */
     $('#copy-link')?.addEventListener('click', () => {
@@ -612,7 +822,7 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       if (!input?.value.trim()) return
       const text = input.value.trim()
       ws.send(JSON.stringify({ type: 'chat', text }))
-      addChatMessage('You', text)
+      addChatMessage(localNickname, text)
       input.value = ''
     })
 
@@ -635,11 +845,8 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     }
 
     /* connect signaling */
-    const host = globalThis.location.port === '4321'
-      ? 'localhost:8787'
-      : 'signal.comprom.org'
     const proto = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${host}/ws/room/${roomId}`
+    const url = `${proto}//${getSignalHost()}/ws/room/${roomId}?nickname=${encodeURIComponent(localNickname)}`
     log(`Connecting to ${url}...`)
 
     ws = new WebSocket(url)
@@ -702,6 +909,9 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     font-size: 0.8rem;
   }
   #toolbar button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     padding: 0.25rem 0.75rem;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -709,6 +919,85 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     color: var(--color-text-primary);
     cursor: pointer;
     font-size: 0.8rem;
+  }
+  #toolbar button svg {
+    flex-shrink: 0;
+  }
+
+  /* ── nickname dialog ── */
+  #nickname-dialog {
+    border: none;
+    border-radius: var(--radius-md);
+    padding: 0;
+    background: var(--color-surface-elevated);
+    color: var(--color-text-primary);
+    box-shadow: var(--shadow-lg);
+    max-width: min(420px, calc(100% - 32px));
+    width: 100%;
+  }
+  #nickname-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+  }
+  #nickname-form {
+    padding: var(--spacing-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+  }
+  #nickname-title {
+    margin: 0;
+    font-size: 1.125rem;
+    color: var(--color-text-primary);
+  }
+  #nickname-input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    border: 1.5px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-background);
+    color: var(--color-text-primary);
+    font-size: 1rem;
+    transition: border-color var(--transition-fast);
+    box-sizing: border-box;
+  }
+  #nickname-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+  }
+  #nickname-submit {
+    padding: 0.75rem 1rem;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+  #nickname-submit:hover {
+    background: var(--color-accent-hover);
+  }
+  #nickname-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 8px 12px;
+    background: hsla(0, 80%, 50%, 0.1);
+    color: hsl(0, 80%, 55%);
+    border: 1px solid hsla(0, 80%, 50%, 0.3);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-6px); }
+    40%, 80% { transform: translateX(6px); }
+  }
+  #nickname-dialog.shake {
+    animation: shake 0.35s ease-in-out;
   }
   #peer-count {
     color: var(--color-text-secondary);
@@ -750,8 +1039,32 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
       grid-template-columns: 1fr;
     }
     #self-view {
-      width: 120px;
-      bottom: 70px;
+      width: 96px;
+      bottom: 80px;
+      right: 12px;
+    }
+    #controls {
+      gap: 0.5rem;
+      padding: 0.5rem;
+    }
+    #controls button {
+      width: 44px;
+      height: 44px;
+    }
+    #toolbar {
+      font-size: 0.75rem;
+      padding: 0.5rem;
+    }
+    #toolbar button span {
+      display: none;
+    }
+    #peer-count {
+      font-size: 0.7rem;
+    }
+    .side-panel {
+      width: calc(100vw - 24px);
+      right: 12px;
+      top: 64px;
     }
   }
   #remote-grid:empty::after {
@@ -800,17 +1113,27 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
     position: absolute;
     bottom: 16px;
     right: 16px;
-    width: 200px;
+    width: 180px;
+    aspect-ratio: 4 / 3;
     border-radius: var(--radius-md);
     overflow: hidden;
     box-shadow: var(--shadow-lg);
     cursor: grab;
     z-index: 10;
     border: 2px solid var(--color-accent);
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #self-view.dragging {
+    cursor: grabbing;
+    opacity: 0.9;
   }
   #self-view video {
     width: 100%;
+    height: 100%;
     display: block;
+    object-fit: cover;
     transform: scaleX(-1);
   }
   #self-label {
@@ -828,33 +1151,51 @@ export const getStaticPaths = () => [{ params: { id: undefined } }]
   #controls {
     display: flex;
     justify-content: center;
+    align-items: center;
     gap: var(--spacing-sm);
-    padding: var(--spacing-xs) var(--spacing-sm);
+    padding: var(--spacing-sm);
     background: var(--color-surface);
     border-top: 1px solid var(--color-border);
   }
   #controls button {
-    padding: 0.5rem 1.25rem;
+    width: 48px;
+    height: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
+    border-radius: 50%;
     background: var(--color-surface-elevated);
     color: var(--color-text-primary);
     cursor: pointer;
-    font-size: 0.875rem;
-    transition: background var(--transition-fast);
+    padding: 0;
+    transition: background var(--transition-fast), transform var(--transition-fast);
   }
-  #controls button:hover { background: var(--color-border); }
+  #controls button:hover {
+    background: var(--color-border);
+    transform: scale(1.05);
+  }
+  #controls button:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  #controls button svg {
+    flex-shrink: 0;
+  }
+  #controls button .icon-off { display: none; }
   #controls button[aria-pressed="true"] {
-    background: hsl(0, 70%, 40%);
+    background: hsl(0, 70%, 45%);
     color: white;
-    border-color: hsl(0, 70%, 30%);
+    border-color: hsl(0, 70%, 35%);
   }
+  #controls button[aria-pressed="true"] .icon-on { display: none; }
+  #controls button[aria-pressed="true"] .icon-off { display: block; }
   #btn-leave {
-    background: hsl(0, 70%, 45%) !important;
+    background: hsl(0, 70%, 48%) !important;
     color: white !important;
-    border-color: hsl(0, 70%, 35%) !important;
+    border-color: hsl(0, 70%, 38%) !important;
   }
-  #btn-leave:hover { background: hsl(0, 70%, 35%) !important; }
+  #btn-leave:hover { background: hsl(0, 70%, 38%) !important; }
 
   /* ── side panels ── */
   .side-panel {
