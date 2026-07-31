@@ -24,7 +24,7 @@
     "@astrojs/cloudflare": "^13.1.8",
     "@astrojs/node": "9",
     "@rtc-less/rtc-components": "workspace:*",
-    "astro": "^5.17.1",
+    "astro": "^7.1.5",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
